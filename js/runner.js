@@ -106,11 +106,12 @@ const Runner = (function() {
                                      // At 0.08: causes runaway 65 deg lean during walking
                                      // (stabBlend stays at 1.0 because muscles always active).
     const TORSO_STAB_IDLE = 0.30;   // P gain: velocity correction per radian of tilt
-    const TORSO_STAB_ACTIVE = 0.06; // Minimum stab during full muscle contraction.
-                                     // At 0.06: +37px forward but torso hits 57 deg (dangerous, 80=fall).
-                                     // At 0.18: torso stays <12 deg but no forward motion (-44px net).
-                                     // With smooth blend: fast ramp to 0.06 for lean, SLOW ramp back
-                                     // to 0.30 prevents snap-back recoil that killed forward momentum.
+    const TORSO_STAB_ACTIVE = 0.10; // Stab at FULL contraction (muscle at 1.0).
+                                     // Blended via contraction level: stab = idle + contraction*(active-idle).
+                                     // At contraction 0.5: stab = 0.20 (moderate control).
+                                     // At contraction 1.0: stab = 0.10 (lean allowed, not fatal).
+                                     // 0.02 = too unstable (R hits 70deg, falls). 0.18 = too rigid (no motion).
+                                     // 0.10 should let asymmetric walks produce forward motion without falling.
     const TORSO_DAMP_IDLE = 0.82;   // D: multiplicative damping (1.0 = none)
     const TORSO_DAMP_ACTIVE = 0.92; // Less damping during active control (more momentum)
 
@@ -449,16 +450,17 @@ const Runner = (function() {
         runner.rolling = allPressed;
 
         // --- Torso balance PD (absolute world-frame reference) ---
-        // Smooth blend between idle (strong=0.30) and active (weak=0.06) stab.
-        // Fast ramp toward active: lets torso lean quickly for forward thrust.
-        // Slow ramp back to idle: prevents snap-back recoil on key release
-        // that was killing all forward momentum from hip drives.
-        const STAB_BLEND_UP = 0.50;    // 2 frames to full active stab (near-instant lean)
-        const STAB_BLEND_DOWN = 0.020; // 50 frames (0.83s) back to full idle stab (prevents recoil)
-        if (anyActive) {
-            runner.stabBlend = Math.min(1, runner.stabBlend + STAB_BLEND_UP);
+        // stabBlend tracks the ACTUAL contraction level, not a binary timer.
+        // Brief taps (contraction ~0.3): stab stays strong (~0.23) = good pushoff.
+        // Full holds (contraction 1.0): stab drops to 0.06 = allows lean.
+        // On release: contraction relaxes gradually (RELAX_SPEED), so stab
+        // recovers smoothly without the snap-back recoil that killed momentum.
+        const STAB_BLEND_DOWN = 0.012; // Slow decay when contraction drops (83 frames)
+        const maxContraction = Math.max(c.leftHip, c.rightHip, c.leftKnee, c.rightKnee);
+        if (maxContraction > runner.stabBlend) {
+            runner.stabBlend = maxContraction; // Instantly track upward with contraction
         } else {
-            runner.stabBlend = Math.max(0, runner.stabBlend - STAB_BLEND_DOWN);
+            runner.stabBlend = Math.max(0, runner.stabBlend - STAB_BLEND_DOWN); // Slow decay
         }
 
         if (!allPressed) {
@@ -656,35 +658,76 @@ const Runner = (function() {
         const kneeR = 6.5; // covers gap between thigh and calf
         const ankleR = 5.5; // covers gap between calf and foot
 
-        function drawBodyPart(body, w, h, color) {
+        // Draw a tapered limb - wider at the joint (top), narrower toward the end (bottom)
+        // This creates a much more organic, human-looking shape vs flat rectangles.
+        function drawLimb(body, topW, bottomW, h, color) {
             ctx.save();
             ctx.translate(body.position.x, body.position.y);
             ctx.rotate(body.angle);
             ctx.fillStyle = color;
+            const r = 2.5;
             ctx.beginPath();
-            ctx.roundRect(-w / 2, -h / 2, w, h, 3);
+            // Top edge (wider)
+            ctx.moveTo(-topW / 2 + r, -h / 2);
+            ctx.lineTo(topW / 2 - r, -h / 2);
+            ctx.quadraticCurveTo(topW / 2, -h / 2, topW / 2, -h / 2 + r);
+            // Right side taper
+            ctx.lineTo(bottomW / 2, h / 2 - r);
+            ctx.quadraticCurveTo(bottomW / 2, h / 2, bottomW / 2 - r, h / 2);
+            // Bottom edge (narrower)
+            ctx.lineTo(-bottomW / 2 + r, h / 2);
+            ctx.quadraticCurveTo(-bottomW / 2, h / 2, -bottomW / 2, h / 2 - r);
+            // Left side taper
+            ctx.lineTo(-topW / 2, -h / 2 + r);
+            ctx.quadraticCurveTo(-topW / 2, -h / 2, -topW / 2 + r, -h / 2);
+            ctx.closePath();
             ctx.fill();
             ctx.restore();
         }
 
+        // Draw a running shoe with visible toe direction (toes point RIGHT in local space)
         function drawShoe(foot, isBack) {
             ctx.save();
             ctx.translate(foot.position.x, foot.position.y);
             ctx.rotate(foot.angle);
-            ctx.fillStyle = shoeColor;
+            const fw = FOOT_W;
+            const fh = FOOT_H;
+            // Shoe upper with toe bump (toe = positive X = forward/right)
+            ctx.fillStyle = isBack ? '#3d5936' : shoeColor;
             ctx.beginPath();
-            ctx.roundRect(-FOOT_W / 2, -FOOT_H / 2, FOOT_W, FOOT_H, 3);
+            ctx.moveTo(-fw / 2, -fh / 2 + 1);        // heel top
+            ctx.lineTo(-fw / 2, fh / 2);              // heel bottom
+            ctx.lineTo(fw / 2 + 1, fh / 2);           // sole front
+            ctx.quadraticCurveTo(fw / 2 + 3, fh / 2 - 2, fw / 2 + 3, -fh / 2 + 1); // toe cap curve
+            ctx.lineTo(fw / 2 - 2, -fh / 2 - 1);     // toe top (raised)
+            ctx.quadraticCurveTo(0, -fh / 2 + 1, -fw / 2 + 3, -fh / 2 + 1); // upper curve
+            ctx.quadraticCurveTo(-fw / 2, -fh / 2 + 1, -fw / 2, -fh / 2 + 3); // heel collar
+            ctx.closePath();
             ctx.fill();
+            // Sole (slightly wider than upper)
             ctx.fillStyle = shoeSoleColor;
-            ctx.fillRect(-FOOT_W / 2, FOOT_H / 2 - 2, FOOT_W, 2);
+            ctx.beginPath();
+            ctx.moveTo(-fw / 2 - 1, fh / 2);
+            ctx.lineTo(fw / 2 + 2, fh / 2);
+            ctx.lineTo(fw / 2 + 2, fh / 2 + 2);
+            ctx.lineTo(-fw / 2 - 1, fh / 2 + 2);
+            ctx.closePath();
+            ctx.fill();
+            // Laces on near foot
             if (!isBack) {
                 ctx.strokeStyle = '#cccccc';
-                ctx.lineWidth = 0.7;
-                ctx.beginPath();
-                ctx.moveTo(-3, -FOOT_H / 2 + 1.5);
-                ctx.lineTo(3, -FOOT_H / 2 + 1.5);
-                ctx.stroke();
+                ctx.lineWidth = 0.6;
+                for (let i = 0; i < 3; i++) {
+                    const lx = -1 + i * 4;
+                    ctx.beginPath();
+                    ctx.moveTo(lx, -fh / 2 + 1);
+                    ctx.lineTo(lx + 2, -fh / 2 + 1);
+                    ctx.stroke();
+                }
             }
+            // Heel tab
+            ctx.fillStyle = isBack ? '#556b2f' : '#5a7a50';
+            ctx.fillRect(-fw / 2, -fh / 2 + 1, 4, fh - 1);
             ctx.restore();
         }
 
@@ -693,9 +736,9 @@ const Runner = (function() {
 
         // -- FAR LEG (left, slightly darker, physically backward) --
         drawJointCircle(parts.torso, -3, TORSO_H / 2, hipR, skinShadow);
-        drawBodyPart(parts.leftThigh, UPPER_LEG_W, UPPER_LEG_H, skinShadow);
+        drawLimb(parts.leftThigh, 13, 10, UPPER_LEG_H, skinShadow);  // thigh: wide at hip, narrow at knee
         drawJointCircle(parts.leftThigh, 0, UPPER_LEG_H / 2, kneeR, skinShadow);
-        drawBodyPart(parts.leftCalf, LOWER_LEG_W, LOWER_LEG_H, skinShadow);
+        drawLimb(parts.leftCalf, 10, 7, LOWER_LEG_H, skinShadow);    // calf: wide at knee, narrow at ankle
         drawJointCircle(parts.leftCalf, 0, LOWER_LEG_H / 2, ankleR, skinShadow);
         drawShoe(parts.leftFoot, true);
 
@@ -747,9 +790,9 @@ const Runner = (function() {
 
         // -- NEAR LEG (right, brighter, physically forward) --
         drawJointCircle(parts.torso, 3, TORSO_H / 2, hipR, skinColor);
-        drawBodyPart(parts.rightThigh, UPPER_LEG_W, UPPER_LEG_H, skinColor);
+        drawLimb(parts.rightThigh, 13, 10, UPPER_LEG_H, skinColor);  // thigh: wide at hip, narrow at knee
         drawJointCircle(parts.rightThigh, 0, UPPER_LEG_H / 2, kneeR, skinColor);
-        drawBodyPart(parts.rightCalf, LOWER_LEG_W, LOWER_LEG_H, skinColor);
+        drawLimb(parts.rightCalf, 10, 7, LOWER_LEG_H, skinColor);    // calf: wide at knee, narrow at ankle
         drawJointCircle(parts.rightCalf, 0, LOWER_LEG_H / 2, ankleR, skinColor);
         drawShoe(parts.rightFoot, false);
 
