@@ -43,15 +43,15 @@ const Runner = (function() {
     const FOOT_FRICTION = 3.0;      // High grip but not insane
 
     // === JOINT MOTOR PARAMETERS ===
-    // Motors now use body.torque (like Box2D) instead of setAngularVelocity.
-    // Torque creates angular ACCELERATION that must fight gravity and inertia.
-    // This is what makes QWOP feel heavy -- you can't just spin legs freely.
-    const HIP_MOTOR_SPEED = 0.08;   // Target relative angular velocity (rad/frame)
-    const KNEE_MOTOR_SPEED = 0.08;  // Target relative angular velocity (rad/frame)
-    const HIP_MAX_TORQUE = 0.4;     // Max torque the hip motor can exert
-    const KNEE_MAX_TORQUE = 0.3;    // Max torque the knee motor can exert
-    const BRAKE_TORQUE = 0.15;      // Braking torque when no key pressed
-    const MOTOR_GAIN = 5.0;         // P-controller gain (how fast motor responds)
+    // Motors use body.torque (like Box2D revolute motors).
+    // High brake torque = stiff joints when no keys pressed = runner can stand.
+    // Active torque must overcome braking + gravity = feels heavy like QWOP.
+    const HIP_MOTOR_SPEED = 0.12;   // Target angular velocity (rad/frame)
+    const KNEE_MOTOR_SPEED = 0.12;
+    const HIP_MAX_TORQUE = 2.5;     // Strong enough to swing legs against gravity
+    const KNEE_MAX_TORQUE = 2.0;
+    const BRAKE_TORQUE = 2.0;       // Very stiff brakes = runner stands when idle
+    const MOTOR_GAIN = 8.0;         // P-controller gain
 
     // === JOINT ANGLE LIMITS ===
     const HIP_MIN_ANGLE = -1.0;     // ~-57 deg (leg behind torso)
@@ -62,7 +62,7 @@ const Runner = (function() {
     const ANKLE_MAX_ANGLE = 0.2;    // Nearly rigid
 
     // === DAMPING ===
-    const ANGULAR_DAMPING = 0.95;   // Stronger damping to prevent wild spinning
+    const ANGULAR_DAMPING = 0.96;   // Moderate damping - not too floaty, not too dead
 
     // Constraint stiffness
     const JOINT_STIFFNESS = 1.0;
