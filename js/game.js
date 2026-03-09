@@ -195,8 +195,11 @@ if (!CanvasRenderingContext2D.prototype.roundRect) {
         showMobileControls();
 
         // Create physics engine
+        // Gravity slightly below default (1.0) — tuned for QWOP-style ragdoll
         engine = Engine.create({
-            gravity: { x: 0, y: 0.55 },
+            gravity: { x: 0, y: 0.8 },
+            constraintIterations: 4,   // More stable joints (default: 2)
+            positionIterations: 10,    // Better position solving (default: 6)
         });
 
         // Create terrain

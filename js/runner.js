@@ -2,9 +2,16 @@
  * JREK Runner - Ragdoll physics body for Scott Jurek
  * Built with Matter.js rigid bodies and constraints
  *
- * Physics approach: Strong angular springs keep the runner standing.
- * Controls apply forces that OVERRIDE the springs to create movement.
- * The challenge is coordinating the override to produce a running gait.
+ * Physics: Authentic QWOP-style joint motor simulation.
+ * Each key pair (J/R for hips, E/K for knees) drives BOTH legs
+ * in opposite directions, exactly like QWOP's Q/W and O/P.
+ *
+ * Key mechanics:
+ * - Joint motors target an angular velocity, limited by max impulse
+ * - When no key is pressed, motors brake (resist rotation = stiff joints)
+ * - No active torso stabilization — balance from coordinated leg motion
+ * - Very heavy feet provide passive pendulum stability
+ * - Joint angle limits prevent unrealistic hyperextension
  */
 
 const Runner = (function() {
@@ -22,25 +29,43 @@ const Runner = (function() {
     const FOOT_W = 22 * SCALE;
     const FOOT_H = 7 * SCALE;
 
-    // Physics tuning
-    const BODY_FRICTION = 0.8;
+    // === MASS DISTRIBUTION (QWOP-inspired) ===
+    // Heavy torso + very heavy feet = low center of mass = pendulum stability
+    const TORSO_DENSITY = 0.006;    // Heaviest segment (like real human)
+    const LIMB_DENSITY = 0.001;     // Light limbs
+    const FOOT_DENSITY = 0.02;      // 20x limb density (QWOP's key insight)
+    const HEAD_DENSITY = 0.0003;    // Near-massless (just for visual/collision)
+
+    // === SURFACE FRICTION ===
+    const BODY_FRICTION = 0.6;
     const BODY_RESTITUTION = 0.02;
+    const FOOT_FRICTION = 5.0;      // Very high — feet grip the trail (QWOP uses 5.0)
 
-    // Densities - heavier feet and torso for stability
-    const LIMB_DENSITY = 0.0008;
-    const TORSO_DENSITY = 0.004;
-    const HEAD_DENSITY = 0.001;
-    const FOOT_DENSITY = 0.005;
+    // === JOINT MOTOR PARAMETERS ===
+    // Motors drive relative angular velocity between connected bodies.
+    // When active (key pressed): motor drives toward target speed.
+    // When inactive (key released): motor brakes (drives toward speed 0).
+    const HIP_MOTOR_SPEED = 0.15;   // Target relative angular velocity (rad/frame)
+    const KNEE_MOTOR_SPEED = 0.15;  // Target relative angular velocity (rad/frame)
+    const MOTOR_STRENGTH = 0.3;     // How aggressively motor reaches target (0-1)
+    const BRAKE_STRENGTH = 0.15;    // How aggressively motor brakes (0-1)
 
-    // Joint stiffness (constraint stiffness)
+    // === JOINT ANGLE LIMITS ===
+    // Relative angle of child body to parent body.
+    // Positive = clockwise rotation in screen coords (y-down).
+    const HIP_MIN_ANGLE = -1.2;     // ~-69° (leg behind torso)
+    const HIP_MAX_ANGLE = 1.2;      // ~+69° (leg in front of torso)
+    const KNEE_MIN_ANGLE = -2.0;    // ~-115° (fully bent, heel toward butt)
+    const KNEE_MAX_ANGLE = 0.1;     // Slightly past straight (tiny tolerance)
+    const ANKLE_MIN_ANGLE = -0.25;  // Nearly rigid
+    const ANKLE_MAX_ANGLE = 0.25;   // Nearly rigid
+
+    // === DAMPING ===
+    const ANGULAR_DAMPING = 0.97;   // Per-frame angular velocity decay (prevents wild spinning)
+
+    // Constraint stiffness
     const JOINT_STIFFNESS = 1.0;
     const JOINT_DAMPING = 0.5;
-
-    // Control force magnitudes - STRONG so they create visible movement
-    const HIP_FORCE = 0.004;    // Force applied at thigh center of mass
-    const KNEE_FORCE = 0.003;   // Force applied at calf center of mass
-    const HIP_TORQUE = 0.12;    // Angular torque on thighs
-    const KNEE_TORQUE = 0.08;   // Angular torque on calves
 
     // Collision categories
     const RUNNER_CATEGORY = 0x0002;
@@ -59,7 +84,7 @@ const Runner = (function() {
             friction: BODY_FRICTION,
             restitution: BODY_RESTITUTION,
             collisionFilter: collisionFilter,
-            frictionAir: 0.02,
+            frictionAir: 0.01,
         };
 
         // HEAD
@@ -69,12 +94,12 @@ const Runner = (function() {
             label: 'head',
         });
 
-        // TORSO
+        // TORSO — heavy with extra air friction to dampen wild swinging
         parts.torso = Bodies.rectangle(x, y, TORSO_W, TORSO_H, {
             ...bodyOptions,
             density: TORSO_DENSITY,
             label: 'torso',
-            frictionAir: 0.03,
+            frictionAir: 0.04,
         });
 
         // LEFT UPPER LEG (thigh)
@@ -105,21 +130,21 @@ const Runner = (function() {
             { ...bodyOptions, density: LIMB_DENSITY, label: 'rightCalf' }
         );
 
-        // LEFT FOOT
+        // LEFT FOOT — very heavy for stability
         parts.leftFoot = Bodies.rectangle(
             x - 3, y + TORSO_H / 2 + UPPER_LEG_H + LOWER_LEG_H + FOOT_H / 2,
             FOOT_W, FOOT_H,
-            { ...bodyOptions, density: FOOT_DENSITY, friction: 1.0, label: 'leftFoot' }
+            { ...bodyOptions, density: FOOT_DENSITY, friction: FOOT_FRICTION, label: 'leftFoot' }
         );
 
-        // RIGHT FOOT
+        // RIGHT FOOT — very heavy for stability
         parts.rightFoot = Bodies.rectangle(
             x + 3, y + TORSO_H / 2 + UPPER_LEG_H + LOWER_LEG_H + FOOT_H / 2,
             FOOT_W, FOOT_H,
-            { ...bodyOptions, density: FOOT_DENSITY, friction: 1.0, label: 'rightFoot' }
+            { ...bodyOptions, density: FOOT_DENSITY, friction: FOOT_FRICTION, label: 'rightFoot' }
         );
 
-        // === CONSTRAINTS ===
+        // === CONSTRAINTS (pin joints) ===
 
         // Neck: head to torso
         constraints.push(Constraint.create({
@@ -199,7 +224,7 @@ const Runner = (function() {
             pointA: { x: 0, y: LOWER_LEG_H / 2 },
             bodyB: parts.leftFoot,
             pointB: { x: -2, y: 0 },
-            stiffness: 0.8,
+            stiffness: 0.9,
             damping: 0.4,
             length: 0,
             label: 'leftAnkle',
@@ -211,44 +236,20 @@ const Runner = (function() {
             pointA: { x: 0, y: LOWER_LEG_H / 2 },
             bodyB: parts.rightFoot,
             pointB: { x: -2, y: 0 },
-            stiffness: 0.8,
+            stiffness: 0.9,
             damping: 0.4,
             length: 0,
             label: 'rightAnkle',
         }));
 
-        // === STRUCTURAL BRACES ===
-
-        // Torso-to-foot distance constraints (prevents legs from collapsing)
-        constraints.push(Constraint.create({
-            bodyA: parts.torso,
-            pointA: { x: -3, y: TORSO_H / 2 },
-            bodyB: parts.leftFoot,
-            pointB: { x: 0, y: 0 },
-            stiffness: 0.08,
-            damping: 0.2,
-            length: UPPER_LEG_H + LOWER_LEG_H + FOOT_H / 2,
-            label: 'leftFullLeg',
-        }));
-
-        constraints.push(Constraint.create({
-            bodyA: parts.torso,
-            pointA: { x: 3, y: TORSO_H / 2 },
-            bodyB: parts.rightFoot,
-            pointB: { x: 0, y: 0 },
-            stiffness: 0.08,
-            damping: 0.2,
-            length: UPPER_LEG_H + LOWER_LEG_H + FOOT_H / 2,
-            label: 'rightFullLeg',
-        }));
-
-        // Thigh cross-brace (prevents splits)
+        // === STRUCTURAL SAFETY NET ===
+        // Thigh cross-brace prevents doing the splits (unrealistic in Matter.js)
         constraints.push(Constraint.create({
             bodyA: parts.leftThigh,
             pointA: { x: 0, y: UPPER_LEG_H / 3 },
             bodyB: parts.rightThigh,
             pointB: { x: 0, y: UPPER_LEG_H / 3 },
-            stiffness: 0.15,
+            stiffness: 0.12,
             damping: 0.3,
             length: 10,
             label: 'thighBrace',
@@ -279,122 +280,118 @@ const Runner = (function() {
         Composite.remove(world, runner.constraints);
     }
 
-    /**
-     * Core stabilization system.
-     * Uses BOTH angular velocity correction AND positional forces.
-     * The angular springs keep limbs at target angles.
-     * When no keys are pressed, the target is "standing straight."
-     */
-    function stabilize(runner, keys) {
-        const { torso, leftThigh, rightThigh, leftCalf, rightCalf, leftFoot, rightFoot } = runner.parts;
+    // === JOINT MOTOR ===
+    // Simulates a Box2D-style revolute joint motor in Matter.js.
+    // Drives relative angular velocity between parent and child toward targetSpeed.
+    // When targetSpeed is 0, acts as a brake (resists rotation = stiff joint).
+    function applyJointMotor(parent, child, targetSpeed) {
+        const relAngVel = child.angularVelocity - parent.angularVelocity;
+        const isActive = targetSpeed !== 0;
+        const strength = isActive ? MOTOR_STRENGTH : BRAKE_STRENGTH;
 
-        const anyKeyPressed = keys && (keys.j || keys.r || keys.e || keys.k);
-        // Reduce stabilization strength when keys are pressed so controls can override
-        const stabStrength = anyKeyPressed ? 0.4 : 1.0;
+        const error = targetSpeed - relAngVel;
+        const impulse = error * strength;
 
-        // === TORSO: strong uprighting ===
-        const torsoAngleError = torso.angle; // target = 0 (vertical)
-        Body.setAngularVelocity(torso,
-            torso.angularVelocity * 0.7 - torsoAngleError * 0.18 * stabStrength
-        );
+        // Distribute impulse by inverse inertia (lighter body moves more)
+        // This is Newton's 3rd law — equal and opposite torques, but
+        // angular acceleration = torque / inertia, so lighter body accelerates more.
+        const totalI = parent.inertia + child.inertia;
+        const childShare = parent.inertia / totalI;
+        const parentShare = child.inertia / totalI;
 
-        // === THIGHS: want to point straight down (angle = torso.angle) ===
-        const leftThighError = leftThigh.angle - torso.angle;
-        const rightThighError = rightThigh.angle - torso.angle;
+        Body.setAngularVelocity(child, child.angularVelocity + impulse * childShare);
+        Body.setAngularVelocity(parent, parent.angularVelocity - impulse * parentShare);
+    }
 
-        // Strong angular correction
-        Body.setAngularVelocity(leftThigh,
-            leftThigh.angularVelocity * 0.7 - leftThighError * 0.14 * stabStrength
-        );
-        Body.setAngularVelocity(rightThigh,
-            rightThigh.angularVelocity * 0.7 - rightThighError * 0.14 * stabStrength
-        );
+    // === ANGLE LIMIT ENFORCEMENT ===
+    // Matter.js doesn't have native angle limits on constraints.
+    // This manually prevents joints from exceeding their range of motion.
+    function enforceAngleLimit(parent, child, minAngle, maxAngle) {
+        let relAngle = child.angle - parent.angle;
+        // Normalize to [-PI, PI]
+        while (relAngle > Math.PI) relAngle -= 2 * Math.PI;
+        while (relAngle < -Math.PI) relAngle += 2 * Math.PI;
 
-        // Also apply a POSITIONAL force pushing thighs downward when they drift
-        // This is key -- angular velocity alone isn't enough
-        if (Math.abs(leftThighError) > 0.1) {
-            Body.applyForce(leftThigh, leftThigh.position, {
-                x: -Math.sin(leftThighError) * 0.0008 * stabStrength,
-                y: Math.abs(Math.cos(leftThighError)) * 0.0003 * stabStrength
-            });
+        if (relAngle < minAngle) {
+            const overshoot = minAngle - relAngle;
+            // Strong corrective push
+            Body.setAngularVelocity(child, child.angularVelocity + overshoot * 0.5);
+            Body.setAngularVelocity(parent, parent.angularVelocity - overshoot * 0.15);
         }
-        if (Math.abs(rightThighError) > 0.1) {
-            Body.applyForce(rightThigh, rightThigh.position, {
-                x: -Math.sin(rightThighError) * 0.0008 * stabStrength,
-                y: Math.abs(Math.cos(rightThighError)) * 0.0003 * stabStrength
-            });
+        if (relAngle > maxAngle) {
+            const overshoot = relAngle - maxAngle;
+            Body.setAngularVelocity(child, child.angularVelocity - overshoot * 0.5);
+            Body.setAngularVelocity(parent, parent.angularVelocity + overshoot * 0.15);
         }
-
-        // === CALVES: want to stay in line with their thigh (straight leg) ===
-        const leftKneeError = leftCalf.angle - leftThigh.angle;
-        const rightKneeError = rightCalf.angle - rightThigh.angle;
-
-        Body.setAngularVelocity(leftCalf,
-            leftCalf.angularVelocity * 0.7 - leftKneeError * 0.12 * stabStrength
-        );
-        Body.setAngularVelocity(rightCalf,
-            rightCalf.angularVelocity * 0.7 - rightKneeError * 0.12 * stabStrength
-        );
-
-        // === FEET: want to stay flat (angle = 0) ===
-        Body.setAngularVelocity(leftFoot,
-            leftFoot.angularVelocity * 0.5 - leftFoot.angle * 0.08
-        );
-        Body.setAngularVelocity(rightFoot,
-            rightFoot.angularVelocity * 0.5 - rightFoot.angle * 0.08
-        );
     }
 
     /**
-     * Apply control forces.
-     * J/R swing the thighs forward (like kicking). These are the primary movers.
-     * E/K extend the calves (push off the ground). These provide thrust.
+     * Core control function — called every physics frame.
      *
-     * The combination of swinging a thigh forward while extending the opposite
-     * calf is what creates forward motion (like actual running).
+     * QWOP-style paired controls:
+     * - J: left hip backward + right hip forward (like QWOP's Q)
+     * - R: left hip forward + right hip backward (like QWOP's W)
+     * - E: left knee one direction + right knee other (like QWOP's O)
+     * - K: opposite of E (like QWOP's P)
+     *
+     * When no key is pressed for a joint pair, the motor brakes
+     * (drives speed toward 0), keeping joints stiff.
      */
     function applyControls(runner, keys) {
-        const { torso, leftThigh, rightThigh, leftCalf, rightCalf } = runner.parts;
+        const { torso, leftThigh, rightThigh, leftCalf, rightCalf, leftFoot, rightFoot } = runner.parts;
 
-        // Run stabilization (with awareness of which keys are pressed)
-        stabilize(runner, keys);
-
-        // J key: LEFT thigh swings forward, RIGHT thigh pushes back
-        if (keys.j) {
-            // Swing left thigh forward (clockwise rotation)
-            Body.setAngularVelocity(leftThigh, leftThigh.angularVelocity + HIP_TORQUE);
-            // Also apply a forward force at the thigh
-            Body.applyForce(leftThigh, leftThigh.position, { x: HIP_FORCE, y: -HIP_FORCE * 0.3 });
-            // Push right thigh back
-            Body.setAngularVelocity(rightThigh, rightThigh.angularVelocity - HIP_TORQUE * 0.6);
-            Body.applyForce(rightThigh, rightThigh.position, { x: -HIP_FORCE * 0.4, y: 0 });
-            // Slight lean forward
-            Body.setAngularVelocity(torso, torso.angularVelocity + 0.008);
+        // --- Angular damping on all bodies (prevents perpetual spinning) ---
+        // Matter.js frictionAir only damps linear velocity, not angular.
+        for (const key of Object.keys(runner.parts)) {
+            const part = runner.parts[key];
+            Body.setAngularVelocity(part, part.angularVelocity * ANGULAR_DAMPING);
         }
 
-        // R key: RIGHT thigh swings forward, LEFT thigh pushes back
-        if (keys.r) {
-            Body.setAngularVelocity(rightThigh, rightThigh.angularVelocity + HIP_TORQUE);
-            Body.applyForce(rightThigh, rightThigh.position, { x: HIP_FORCE, y: -HIP_FORCE * 0.3 });
-            Body.setAngularVelocity(leftThigh, leftThigh.angularVelocity - HIP_TORQUE * 0.6);
-            Body.applyForce(leftThigh, leftThigh.position, { x: -HIP_FORCE * 0.4, y: 0 });
-            Body.setAngularVelocity(torso, torso.angularVelocity + 0.008);
+        // --- Determine target motor speeds ---
+        // Each key drives BOTH legs of the pair in opposite directions.
+        // This creates the natural reciprocal motion of running.
+        let leftHipTarget = 0;
+        let rightHipTarget = 0;
+        let leftKneeTarget = 0;
+        let rightKneeTarget = 0;
+
+        // J: swing right thigh forward, left thigh backward
+        // R: swing left thigh forward, right thigh backward
+        if (keys.j && !keys.r) {
+            leftHipTarget = -HIP_MOTOR_SPEED;
+            rightHipTarget = HIP_MOTOR_SPEED;
+        } else if (keys.r && !keys.j) {
+            leftHipTarget = HIP_MOTOR_SPEED;
+            rightHipTarget = -HIP_MOTOR_SPEED;
+        }
+        // Both pressed or neither = brake (target speed 0)
+
+        // E/K: swing calves in opposite directions
+        if (keys.e && !keys.k) {
+            leftKneeTarget = KNEE_MOTOR_SPEED;
+            rightKneeTarget = -KNEE_MOTOR_SPEED;
+        } else if (keys.k && !keys.e) {
+            leftKneeTarget = -KNEE_MOTOR_SPEED;
+            rightKneeTarget = KNEE_MOTOR_SPEED;
         }
 
-        // E key: LEFT calf kicks out (extends knee) - provides push-off
-        if (keys.e) {
-            Body.setAngularVelocity(leftCalf, leftCalf.angularVelocity - KNEE_TORQUE);
-            Body.applyForce(leftCalf, leftCalf.position, { x: KNEE_FORCE, y: -KNEE_FORCE * 0.5 });
-            // Reaction on thigh
-            Body.setAngularVelocity(leftThigh, leftThigh.angularVelocity + KNEE_TORQUE * 0.3);
-        }
+        // --- Apply joint motors ---
+        applyJointMotor(torso, leftThigh, leftHipTarget);
+        applyJointMotor(torso, rightThigh, rightHipTarget);
+        applyJointMotor(leftThigh, leftCalf, leftKneeTarget);
+        applyJointMotor(rightThigh, rightCalf, rightKneeTarget);
 
-        // K key: RIGHT calf kicks out
-        if (keys.k) {
-            Body.setAngularVelocity(rightCalf, rightCalf.angularVelocity - KNEE_TORQUE);
-            Body.applyForce(rightCalf, rightCalf.position, { x: KNEE_FORCE, y: -KNEE_FORCE * 0.5 });
-            Body.setAngularVelocity(rightThigh, rightThigh.angularVelocity + KNEE_TORQUE * 0.3);
-        }
+        // Ankles: always brake (keep feet relatively flat)
+        applyJointMotor(leftCalf, leftFoot, 0);
+        applyJointMotor(rightCalf, rightFoot, 0);
+
+        // --- Enforce angle limits ---
+        enforceAngleLimit(torso, leftThigh, HIP_MIN_ANGLE, HIP_MAX_ANGLE);
+        enforceAngleLimit(torso, rightThigh, HIP_MIN_ANGLE, HIP_MAX_ANGLE);
+        enforceAngleLimit(leftThigh, leftCalf, KNEE_MIN_ANGLE, KNEE_MAX_ANGLE);
+        enforceAngleLimit(rightThigh, rightCalf, KNEE_MIN_ANGLE, KNEE_MAX_ANGLE);
+        enforceAngleLimit(leftCalf, leftFoot, ANKLE_MIN_ANGLE, ANKLE_MAX_ANGLE);
+        enforceAngleLimit(rightCalf, rightFoot, ANKLE_MIN_ANGLE, ANKLE_MAX_ANGLE);
     }
 
     // Check if the runner has fallen
