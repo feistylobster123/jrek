@@ -428,7 +428,9 @@ const Runner = (function() {
         };
     }
 
-    // Draw the runner on canvas - Scott Jurek style
+    // Draw the runner on canvas - Classic Jurek Western States look
+    // Reference: White Montrail/Patagonia crop top, CLIF cap, black shorts,
+    // handheld bottle, long hair, clean-shaven, yellow wristband
     function render(ctx, runner, cameraX, cameraY) {
         const parts = runner.parts;
         const ox = -cameraX;
@@ -437,19 +439,25 @@ const Runner = (function() {
         ctx.save();
         ctx.translate(ox, oy);
 
-        // Color palette - Jurek classic Western States look
+        // Color palette - Jurek at Western States circa 2003-2005
         const skinColor = '#c49a6c';
         const skinShadow = '#a8825a';
-        const cropTopColor = '#2563eb'; // Classic blue crop top
-        const shortsColor = '#1e1e2e'; // Short black shorts
-        const shoeColor = '#b91c1c'; // Red trail shoes
+        const cropTopColor = '#f0ebe3'; // White crop top
+        const cropTopShadow = '#d8d0c4';
+        const shortsColor = '#1a1a1a'; // Black shorts
+        const gearBeltColor = '#333333'; // Gear belt/pack
+        const shoeColor = '#4a6741'; // Montrail green trail shoes
         const shoeSoleColor = '#1a1a1a';
-        const bandanaColor = '#dc2626'; // Red bandana
-        const hairColor = '#3b2507';
-        const beardColor = '#4a3019';
+        const capRedColor = '#cc2222'; // CLIF red cap panel
+        const capWhiteColor = '#e8e0d4'; // Cap mesh
+        const capBrimColor = '#2a2a2a';
+        const hairColor = '#3b2507'; // Long brown hair
+        const wristbandColor = '#e6cc00'; // Yellow wristband
+        const watchColor = '#222222';
+        const bottleColor = '#e8e8e8'; // White handheld bottle
 
-        // Helper: draw a rotated rectangle with optional outline
-        function drawBodyPart(body, w, h, color, outlineColor) {
+        // Helper: draw a rotated rectangle
+        function drawBodyPart(body, w, h, color) {
             ctx.save();
             ctx.translate(body.position.x, body.position.y);
             ctx.rotate(body.angle);
@@ -457,99 +465,137 @@ const Runner = (function() {
             ctx.beginPath();
             ctx.roundRect(-w / 2, -h / 2, w, h, 3);
             ctx.fill();
-            if (outlineColor) {
-                ctx.strokeStyle = outlineColor;
-                ctx.lineWidth = 1;
+            ctx.restore();
+        }
+
+        // Helper: draw a shoe
+        function drawShoe(foot, isBack) {
+            ctx.save();
+            ctx.translate(foot.position.x, foot.position.y);
+            ctx.rotate(foot.angle);
+            // Shoe body
+            ctx.fillStyle = shoeColor;
+            ctx.beginPath();
+            ctx.roundRect(-FOOT_W / 2, -FOOT_H / 2, FOOT_W, FOOT_H, 3);
+            ctx.fill();
+            // Sole
+            ctx.fillStyle = shoeSoleColor;
+            ctx.fillRect(-FOOT_W / 2, FOOT_H / 2 - 2, FOOT_W, 2);
+            // Lace detail
+            if (!isBack) {
+                ctx.strokeStyle = '#cccccc';
+                ctx.lineWidth = 0.7;
+                ctx.beginPath();
+                ctx.moveTo(-3, -FOOT_H / 2 + 1.5);
+                ctx.lineTo(3, -FOOT_H / 2 + 1.5);
                 ctx.stroke();
             }
             ctx.restore();
         }
 
-        // Draw order: back leg, torso, front leg, head
+        // === DRAW ORDER: back leg, back arm, torso, front arm, front leg, head ===
 
-        // Left leg (back, slightly darker)
+        // -- BACK LEG (left, slightly darker) --
         drawBodyPart(parts.leftThigh, UPPER_LEG_W, UPPER_LEG_H, skinShadow);
         drawBodyPart(parts.leftCalf, LOWER_LEG_W, LOWER_LEG_H, skinShadow);
-        // Left shoe
-        ctx.save();
-        ctx.translate(parts.leftFoot.position.x, parts.leftFoot.position.y);
-        ctx.rotate(parts.leftFoot.angle);
-        ctx.fillStyle = shoeColor;
-        ctx.beginPath();
-        ctx.roundRect(-FOOT_W / 2, -FOOT_H / 2, FOOT_W, FOOT_H, 3);
-        ctx.fill();
-        ctx.fillStyle = shoeSoleColor;
-        ctx.fillRect(-FOOT_W / 2, FOOT_H / 2 - 2, FOOT_W, 2);
-        ctx.restore();
+        drawShoe(parts.leftFoot, true);
 
-        // Torso - crop top style (shows midriff!)
+        // -- TORSO --
         ctx.save();
         ctx.translate(parts.torso.position.x, parts.torso.position.y);
         ctx.rotate(parts.torso.angle);
 
-        // Skin (full torso)
+        // Full torso skin
         ctx.fillStyle = skinColor;
         ctx.beginPath();
         ctx.roundRect(-TORSO_W / 2, -TORSO_H / 2, TORSO_W, TORSO_H, 4);
         ctx.fill();
 
-        // Crop top (only covers upper 55% of torso)
-        const cropHeight = TORSO_H * 0.55;
+        // White crop top (upper ~50% of torso, showing midriff)
+        const cropHeight = TORSO_H * 0.50;
         ctx.fillStyle = cropTopColor;
         ctx.beginPath();
         ctx.roundRect(-TORSO_W / 2 - 1, -TORSO_H / 2, TORSO_W + 2, cropHeight, [4, 4, 0, 0]);
         ctx.fill();
 
-        // Crop top trim/hem line
-        ctx.strokeStyle = '#1d4ed8';
-        ctx.lineWidth = 1.5;
+        // Crop top wrinkle/shadow lines for texture
+        ctx.strokeStyle = cropTopShadow;
+        ctx.lineWidth = 0.6;
         ctx.beginPath();
-        ctx.moveTo(-TORSO_W / 2, -TORSO_H / 2 + cropHeight);
-        ctx.lineTo(TORSO_W / 2, -TORSO_H / 2 + cropHeight);
+        ctx.moveTo(-TORSO_W / 4, -TORSO_H / 2 + cropHeight * 0.3);
+        ctx.lineTo(TORSO_W / 4, -TORSO_H / 2 + cropHeight * 0.35);
+        ctx.moveTo(-TORSO_W / 3, -TORSO_H / 2 + cropHeight * 0.6);
+        ctx.lineTo(TORSO_W / 5, -TORSO_H / 2 + cropHeight * 0.55);
         ctx.stroke();
 
-        // Exposed midriff (just the skin showing below crop top, above shorts)
+        // Crop top hem (slightly ragged/loose)
+        ctx.strokeStyle = '#c0b8aa';
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.moveTo(-TORSO_W / 2 - 1, -TORSO_H / 2 + cropHeight);
+        ctx.lineTo(TORSO_W / 2 + 1, -TORSO_H / 2 + cropHeight + 1);
+        ctx.stroke();
 
-        // Short shorts (bottom portion)
+        // Exposed midriff area (skin is already drawn)
+
+        // Black shorts with gear belt
         const shortsTop = TORSO_H / 4;
         ctx.fillStyle = shortsColor;
         ctx.beginPath();
         ctx.roundRect(-TORSO_W / 2 - 1, shortsTop, TORSO_W + 2, TORSO_H / 2 - shortsTop + 1, [0, 0, 3, 3]);
         ctx.fill();
 
+        // Gear belt at top of shorts
+        ctx.fillStyle = gearBeltColor;
+        ctx.fillRect(-TORSO_W / 2 - 2, shortsTop - 1, TORSO_W + 4, 4);
+        // Small gear pouch on the belt
+        ctx.fillStyle = '#444444';
+        ctx.fillRect(TORSO_W / 2 - 2, shortsTop - 2, 5, 6);
+
         ctx.restore();
 
-        // Right leg (front, brighter)
+        // -- FRONT LEG (right, brighter) --
         drawBodyPart(parts.rightThigh, UPPER_LEG_W, UPPER_LEG_H, skinColor);
         drawBodyPart(parts.rightCalf, LOWER_LEG_W, LOWER_LEG_H, skinColor);
-        // Right shoe
+        drawShoe(parts.rightFoot, false);
+
+        // -- HANDHELD BOTTLE (attached to right hand area, near torso bottom) --
         ctx.save();
-        ctx.translate(parts.rightFoot.position.x, parts.rightFoot.position.y);
-        ctx.rotate(parts.rightFoot.angle);
-        ctx.fillStyle = shoeColor;
+        ctx.translate(parts.torso.position.x, parts.torso.position.y);
+        ctx.rotate(parts.torso.angle);
+        // Bottle in right hand
+        ctx.fillStyle = bottleColor;
         ctx.beginPath();
-        ctx.roundRect(-FOOT_W / 2, -FOOT_H / 2, FOOT_W, FOOT_H, 3);
+        ctx.roundRect(TORSO_W / 2 - 2, -2, 5, 10, 2);
         ctx.fill();
-        ctx.fillStyle = shoeSoleColor;
-        ctx.fillRect(-FOOT_W / 2, FOOT_H / 2 - 2, FOOT_W, 2);
-        // Shoe lace detail
-        ctx.strokeStyle = '#ffffff';
-        ctx.lineWidth = 0.8;
+        // Bottle cap
+        ctx.fillStyle = '#aaaaaa';
         ctx.beginPath();
-        ctx.moveTo(-3, -FOOT_H / 2 + 1);
-        ctx.lineTo(3, -FOOT_H / 2 + 1);
-        ctx.stroke();
+        ctx.arc(TORSO_W / 2 + 0.5, -2, 2.5, Math.PI, 0);
+        ctx.fill();
+        // Yellow wristband on the same side
+        ctx.fillStyle = wristbandColor;
+        ctx.fillRect(TORSO_W / 2 - 3, 8, 7, 3);
+        // Watch on left wrist area
+        ctx.fillStyle = watchColor;
+        ctx.fillRect(-TORSO_W / 2 - 3, 6, 5, 4);
+        ctx.fillStyle = '#335533';
+        ctx.fillRect(-TORSO_W / 2 - 2, 7, 3, 2);
         ctx.restore();
 
-        // HEAD
+        // -- HEAD --
         ctx.save();
         ctx.translate(parts.head.position.x, parts.head.position.y);
         ctx.rotate(parts.head.angle);
 
-        // Hair (behind head)
+        // Long hair flowing behind (Jurek's signature long hair)
         ctx.fillStyle = hairColor;
         ctx.beginPath();
-        ctx.arc(0, -1, HEAD_RADIUS + 1, Math.PI * 1.0, Math.PI * 2.0);
+        // Hair behind head
+        ctx.arc(0, 0, HEAD_RADIUS + 2, Math.PI * 0.6, Math.PI * 1.4);
+        // Long hair flowing down/back
+        ctx.quadraticCurveTo(-HEAD_RADIUS - 4, HEAD_RADIUS + 6, -HEAD_RADIUS - 2, HEAD_RADIUS + 12);
+        ctx.quadraticCurveTo(-HEAD_RADIUS + 2, HEAD_RADIUS + 10, -HEAD_RADIUS + 4, HEAD_RADIUS + 4);
         ctx.fill();
 
         // Head circle (skin)
@@ -558,40 +604,62 @@ const Runner = (function() {
         ctx.arc(0, 0, HEAD_RADIUS, 0, Math.PI * 2);
         ctx.fill();
 
-        // Bandana (Jurek's signature red bandana)
-        ctx.fillStyle = bandanaColor;
+        // CLIF trucker cap
+        // Cap dome (red front panel)
+        ctx.fillStyle = capRedColor;
         ctx.beginPath();
-        ctx.arc(0, -2, HEAD_RADIUS + 1, Math.PI * 1.05, Math.PI * 1.95);
-        ctx.fill();
-        // Bandana tail flowing back
-        ctx.beginPath();
-        ctx.moveTo(-HEAD_RADIUS + 2, -4);
-        ctx.quadraticCurveTo(-HEAD_RADIUS - 8, -6, -HEAD_RADIUS - 10, -2);
-        ctx.quadraticCurveTo(-HEAD_RADIUS - 8, 0, -HEAD_RADIUS + 2, 0);
-        ctx.fillStyle = bandanaColor;
+        ctx.arc(0, -2, HEAD_RADIUS + 2, Math.PI * 1.1, Math.PI * 1.7);
+        ctx.lineTo(HEAD_RADIUS * 0.5, -HEAD_RADIUS - 3);
+        ctx.quadraticCurveTo(0, -HEAD_RADIUS - 5, -HEAD_RADIUS * 0.5, -HEAD_RADIUS - 3);
+        ctx.closePath();
         ctx.fill();
 
-        // Beard (Jurek's trail beard)
-        ctx.fillStyle = beardColor;
+        // Cap mesh (white/grey back panels)
+        ctx.fillStyle = capWhiteColor;
         ctx.beginPath();
-        ctx.arc(0, 3, HEAD_RADIUS * 0.7, 0, Math.PI);
+        ctx.arc(0, -2, HEAD_RADIUS + 2, Math.PI * 1.7, Math.PI * 2.0);
+        ctx.arc(0, -2, HEAD_RADIUS + 2, 0, Math.PI * 0.3);
+        ctx.closePath();
         ctx.fill();
+
+        // Cap brim
+        ctx.fillStyle = capBrimColor;
+        ctx.beginPath();
+        ctx.moveTo(HEAD_RADIUS * 0.9, -HEAD_RADIUS * 0.3);
+        ctx.quadraticCurveTo(HEAD_RADIUS + 8, -HEAD_RADIUS * 0.5, HEAD_RADIUS + 10, -HEAD_RADIUS * 0.15);
+        ctx.quadraticCurveTo(HEAD_RADIUS + 8, HEAD_RADIUS * 0.1, HEAD_RADIUS * 0.7, -HEAD_RADIUS * 0.05);
+        ctx.closePath();
+        ctx.fill();
+
+        // CLIF text on cap (tiny)
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 5px Arial';
+        ctx.textAlign = 'center';
+        ctx.fillText('CLIF', 1, -HEAD_RADIUS + 1);
 
         // Eyes
         ctx.fillStyle = '#1a1208';
         ctx.beginPath();
-        ctx.arc(-4, -2, 1.8, 0, Math.PI * 2);
-        ctx.arc(4, -2, 1.8, 0, Math.PI * 2);
+        ctx.arc(-4, -1, 1.8, 0, Math.PI * 2);
+        ctx.arc(4, -1, 1.8, 0, Math.PI * 2);
         ctx.fill();
 
-        // Eyebrows (determined look)
+        // Eyebrows (focused)
         ctx.strokeStyle = '#2a1a08';
-        ctx.lineWidth = 1.5;
+        ctx.lineWidth = 1.3;
         ctx.beginPath();
-        ctx.moveTo(-6, -5);
-        ctx.lineTo(-2, -4.5);
-        ctx.moveTo(2, -4.5);
-        ctx.lineTo(6, -5);
+        ctx.moveTo(-6, -4);
+        ctx.lineTo(-2, -3.5);
+        ctx.moveTo(2, -3.5);
+        ctx.lineTo(6, -4);
+        ctx.stroke();
+
+        // Nose (subtle line)
+        ctx.strokeStyle = '#a07850';
+        ctx.lineWidth = 0.8;
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.lineTo(1, 2);
         ctx.stroke();
 
         // Mouth
@@ -599,22 +667,22 @@ const Runner = (function() {
         ctx.lineWidth = 1.5;
         ctx.beginPath();
         if (runner.fallen) {
-            // Yelling face
-            ctx.arc(0, 4, 3.5, 0, Math.PI * 2);
+            // Yelling "MINNESOTA!!"
+            ctx.arc(0, 5, 3.5, 0, Math.PI * 2);
             ctx.fillStyle = '#1a1208';
             ctx.fill();
         } else {
             // Determined grimace
-            ctx.moveTo(-3, 4);
-            ctx.lineTo(3, 4);
+            ctx.moveTo(-3, 5);
+            ctx.lineTo(3, 5);
         }
         ctx.stroke();
 
         ctx.restore();
 
-        // Joint dots (subtle, at connection points)
-        ctx.fillStyle = 'rgba(0,0,0,0.2)';
-        const jointSize = 2.5;
+        // Joint dots (very subtle)
+        ctx.fillStyle = 'rgba(0,0,0,0.15)';
+        const jointSize = 2;
         drawJointDot(ctx, parts.torso, { x: -3, y: TORSO_H / 2 }, jointSize);
         drawJointDot(ctx, parts.torso, { x: 3, y: TORSO_H / 2 }, jointSize);
         drawJointDot(ctx, parts.leftThigh, { x: 0, y: UPPER_LEG_H / 2 }, jointSize);
