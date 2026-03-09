@@ -2,15 +2,17 @@
  * JREK Runner - Ragdoll physics body for Scott Jurek
  * Built with Matter.js rigid bodies and constraints
  *
- * v0.8 Physics: Nick's simplified rigid-body approach.
- * - Body is a RIGID STRUCTURE when no buttons pressed.
- *   Every joint has a PD controller holding it at its rest angle.
- *   No separate torso stabilization -- rigidity comes from ALL joints
- *   acting as one unit. The whole body is an inverted pendulum.
- * - J/R drive hips only (knees + ankles stay locked)
- * - E/K drive knees only (hips + ankles stay locked)
- * - Ankles always locked
- * - Split stance start: legs apart, knees slightly bent, feet on ground
+ * v0.9 Physics: Individual muscle contraction model.
+ * - Each button controls ONE muscle on ONE leg (puppet-string feel):
+ *   J = left hip flexor (thigh lifts forward)
+ *   R = right hip flexor (thigh lifts forward)
+ *   E = left hamstring (calf pulls back, knee bends)
+ *   K = right hamstring (calf pulls back, knee bends)
+ * - HOLD key = gradual contraction toward maximum range
+ * - RELEASE key = gradual relaxation back to rest
+ * - Body is RIGID when no buttons pressed (PD locks on all joints)
+ * - Separate torso PD handles absolute balance
+ * - Walking = alternate R+K (lift right leg) then J+E (lift left leg)
  */
 
 const Runner = (function() {
@@ -51,15 +53,33 @@ const Runner = (function() {
     const BODY_RESTITUTION = 0.01;
     const FOOT_FRICTION = 3.0;
 
-    // === JOINT MOTOR PARAMETERS ===
-    // Motors now drive toward TARGET ANGLES (not speeds).
-    // When J/R/E/K is pressed, the joint's target angle shifts from its rest position.
-    // Uses the same PD controller as lockJoint but with a softer response.
-    // This creates real constraint forces: if the foot is planted, the body moves.
-    const HIP_DRIVE_ANGLE = 0.40;    // How far hips swing from rest (radians, ~23deg)
-    const KNEE_DRIVE_ANGLE = 0.35;   // How far knees bend from rest
-    const MOTOR_POS_GAIN = 0.80;     // Same strength as lock PD (motor = lock at shifted target)
-    const MOTOR_DAMP = 0.95;         // Strong damping to prevent oscillation
+    // === FOOT GROUND CONTACT ===
+    // The constraint chain (hip->thigh->knee->calf->ankle->foot) has spring compliance
+    // that leaves feet ~3.5px above ground at equilibrium. This extra downward force on
+    // feet closes the gap, creating the ground penetration needed for friction forces.
+    // Without this, feet hover and there's no friction to brake horizontal drift.
+    const FOOT_GRAVITY_BOOST = 0.008; // Extra downward force per foot per frame
+                                      // 0.008 gets right foot ON ground (bottom +1.8px into surface).
+                                      // Left foot stays ~0.9px above due to forward stance geometry.
+                                      // 0.015 over-compresses the forward leg, causing collapse.
+
+    // === MUSCLE CONTRACTION MODEL ===
+    // Each button = one muscle. Holding = gradual contraction (0 to 1).
+    // Releasing = gradual relaxation (1 to 0). Target angle tracks contraction.
+    const CONTRACT_SPEED = 0.018;    // Contraction per frame (~55 frames = 0.9s to full)
+    const RELAX_SPEED = 0.030;       // Relaxation per frame (~33 frames = 0.55s to rest)
+    const HIP_FLEX_RANGE = 0.65;     // Max hip flexion from rest (radians, ~37 deg)
+    const KNEE_FLEX_RANGE = 1.0;     // Max knee flexion from rest (~57 deg)
+
+    // Hip motor: torque-based PD tracks the contraction target
+    const HIP_MOTOR_P = 0.50;        // Torque per radian of error
+    const HIP_MOTOR_D = 0.15;        // Damping torque per rad/s
+    const HIP_MOTOR_MAX = 0.50;      // Max torque per frame
+
+    // Knee motor: torque-based, strong enough to lift feet off ground
+    const KNEE_MOTOR_P = 0.45;       // Strong enough to overcome heavy feet + gravity
+    const KNEE_MOTOR_D = 0.12;       // Damping prevents oscillation
+    const KNEE_MOTOR_MAX = 0.40;     // Enough to actually bend the knee visibly
 
     // === PASSIVE JOINT MODE ===
     // When a joint's neighbors are actively driven, this joint needs to be SOFT
@@ -81,10 +101,12 @@ const Runner = (function() {
     // Per-joint PD can't detect whole-body tilt because hip/knee relative
     // angles stay constant when the body tilts as a unit. Only the torso PD
     // references the world frame.
-    const TORSO_TARGET = 0.03;      // Target lean angle (radians). Slight forward lean
+    const TORSO_TARGET = 0.04;      // Target lean angle (radians, ~2.3 deg). Forward lean
                                      // counteracts backward drift from constraint settling.
+                                     // With FOOT_GRAVITY_BOOST=0.008, friction handles most braking.
     const TORSO_STAB_IDLE = 0.30;   // P gain: velocity correction per radian of tilt
-    const TORSO_STAB_ACTIVE = 0.04; // Much weaker when keys pressed (allows lean for ground reaction)
+    const TORSO_STAB_ACTIVE = 0.06; // Must be weak enough for motor reactions to create torso lean.
+                                     // Forward motion = lean + foot pushoff. Too strong = no lean = no forward force.
     const TORSO_DAMP_IDLE = 0.82;   // D: multiplicative damping (1.0 = none)
     const TORSO_DAMP_ACTIVE = 0.92; // Less damping during active control (more momentum)
 
@@ -316,6 +338,13 @@ const Runner = (function() {
             distance: 0,
             maxDistance: 0,
             rolling: false,
+            // Muscle contraction levels (0 = relaxed, 1 = fully contracted)
+            contractions: {
+                leftHip: 0,    // J key
+                rightHip: 0,   // R key
+                leftKnee: 0,   // E key
+                rightKnee: 0,  // K key
+            },
         };
 
         return runner;
@@ -333,26 +362,21 @@ const Runner = (function() {
         Composite.remove(world, runner.constraints);
     }
 
-    // === JOINT MOTOR (TORQUE-BASED, ANGLE-TARGETING) ===
-    // Drives joint toward a TARGET ANGLE using torques (not velocity corrections).
+    // === HIP MOTOR (TORQUE-BASED, ANGLE-TARGETING) ===
+    // Drives hip toward a TARGET ANGLE using torques (not velocity corrections).
     // CRITICAL: Torques persist through the constraint solver, creating real forces
     // that propagate through the joint chain to feet, producing ground reaction.
-    // Velocity-based corrections get eaten by the constraint solver.
     // Reaction torque on parent = Newton's 3rd law = torso sway from motor effort.
-    const MOTOR_P = 1.0;      // Torque per radian of error
-    const MOTOR_D = 0.2;      // Torque per rad/s of relative velocity (damping)
-    const MOTOR_MAX = 0.8;    // Max torque per frame (enough for visible motion, not instant flips)
-
-    function driveJoint(parent, child, targetAngle) {
+    function driveJoint(parent, child, targetAngle, P, D, maxTorque) {
         let relAngle = child.angle - parent.angle;
         while (relAngle > Math.PI) relAngle -= 2 * Math.PI;
         while (relAngle < -Math.PI) relAngle += 2 * Math.PI;
         const relAngVel = child.angularVelocity - parent.angularVelocity;
         const angleError = targetAngle - relAngle;
 
-        let torque = angleError * MOTOR_P - relAngVel * MOTOR_D;
-        if (torque > MOTOR_MAX) torque = MOTOR_MAX;
-        if (torque < -MOTOR_MAX) torque = -MOTOR_MAX;
+        let torque = angleError * P - relAngVel * D;
+        if (torque > maxTorque) torque = maxTorque;
+        if (torque < -maxTorque) torque = -maxTorque;
 
         child.torque += torque;
         parent.torque -= torque; // Reaction torque = ground reaction force propagation
@@ -394,29 +418,33 @@ const Runner = (function() {
     /**
      * Core control function -- called every physics frame.
      *
-     * HYBRID APPROACH:
-     * - Per-joint PD locks hold relative angles (keeps limbs rigid)
-     * - Separate torso PD handles absolute balance (inverted pendulum)
-     * - J/R: drive hips with motors, everything else locked
-     * - E/K: drive knees with motors, everything else locked
-     * - All four: rolling easter egg
+     * INDIVIDUAL MUSCLE CONTRACTION MODEL:
+     * - Each button controls one muscle on one leg
+     * - Holding a key gradually contracts the muscle (0 -> 1)
+     * - Releasing gradually relaxes it (1 -> 0)
+     * - Target angle = rest + contraction * range
+     * - Per-joint PD locks hold inactive joints rigid
+     * - Separate torso PD handles absolute balance
+     * - All four keys = barrel roll easter egg
      */
     function applyControls(runner, keys) {
         const { torso, leftThigh, rightThigh, leftCalf, rightCalf, leftFoot, rightFoot } = runner.parts;
+        const c = runner.contractions;
+
+        // --- Update muscle contraction levels (gradual, puppet-string feel) ---
+        c.leftHip = keys.j ? Math.min(1, c.leftHip + CONTRACT_SPEED) : Math.max(0, c.leftHip - RELAX_SPEED);
+        c.rightHip = keys.r ? Math.min(1, c.rightHip + CONTRACT_SPEED) : Math.max(0, c.rightHip - RELAX_SPEED);
+        c.leftKnee = keys.e ? Math.min(1, c.leftKnee + CONTRACT_SPEED) : Math.max(0, c.leftKnee - RELAX_SPEED);
+        c.rightKnee = keys.k ? Math.min(1, c.rightKnee + CONTRACT_SPEED) : Math.max(0, c.rightKnee - RELAX_SPEED);
 
         const allPressed = keys.j && keys.r && keys.e && keys.k;
-        const anyPressed = keys.j || keys.r || keys.e || keys.k;
-        const anyHipKey = keys.j || keys.r;
-        const anyKneeKey = keys.e || keys.k;
+        const anyActive = c.leftHip > 0.01 || c.rightHip > 0.01 || c.leftKnee > 0.01 || c.rightKnee > 0.01;
         runner.rolling = allPressed;
 
         // --- Torso balance PD (absolute world-frame reference) ---
-        // Per-joint PD only corrects relative angles. When the whole body
-        // tilts as a unit, hip/knee angles don't change. Only this PD
-        // references the world frame. Target is TORSO_TARGET (slight forward lean).
         if (!allPressed) {
-            const stabStrength = anyPressed ? TORSO_STAB_ACTIVE : TORSO_STAB_IDLE;
-            const dampFactor = anyPressed ? TORSO_DAMP_ACTIVE : TORSO_DAMP_IDLE;
+            const stabStrength = anyActive ? TORSO_STAB_ACTIVE : TORSO_STAB_IDLE;
+            const dampFactor = anyActive ? TORSO_DAMP_ACTIVE : TORSO_DAMP_IDLE;
             const tiltError = torso.angle - TORSO_TARGET;
             Body.setAngularVelocity(torso,
                 torso.angularVelocity * dampFactor - tiltError * stabStrength
@@ -433,12 +461,12 @@ const Runner = (function() {
 
             const phase = Math.sin(torso.angle * 2);
             const hipDelta = phase > 0 ? 0.5 : -0.5;
-            driveJoint(torso, leftThigh, hipDelta);
-            driveJoint(torso, rightThigh, -hipDelta);
-            driveJoint(leftThigh, leftCalf, 0);
-            driveJoint(rightThigh, rightCalf, 0);
-            driveJoint(leftCalf, leftFoot, 0);
-            driveJoint(rightCalf, rightFoot, 0);
+            driveJoint(torso, leftThigh, hipDelta, HIP_MOTOR_P, HIP_MOTOR_D, HIP_MOTOR_MAX);
+            driveJoint(torso, rightThigh, -hipDelta, HIP_MOTOR_P, HIP_MOTOR_D, HIP_MOTOR_MAX);
+            driveJoint(leftThigh, leftCalf, 0, KNEE_MOTOR_P, KNEE_MOTOR_D, KNEE_MOTOR_MAX);
+            driveJoint(rightThigh, rightCalf, 0, KNEE_MOTOR_P, KNEE_MOTOR_D, KNEE_MOTOR_MAX);
+            driveJoint(leftCalf, leftFoot, 0, KNEE_MOTOR_P, KNEE_MOTOR_D, KNEE_MOTOR_MAX);
+            driveJoint(rightCalf, rightFoot, 0, KNEE_MOTOR_P, KNEE_MOTOR_D, KNEE_MOTOR_MAX);
 
             enforceAngleLimit(torso, leftThigh, -2.2, 2.2);
             enforceAngleLimit(torso, rightThigh, -2.2, 2.2);
@@ -450,79 +478,78 @@ const Runner = (function() {
             return;
         }
 
-        // --- Determine motor target angles ---
-        // Each key shifts the target angle from its rest position.
-        // J: left hip swings back, right hip swings forward (scissor)
-        // R: left hip swings forward, right hip swings back (opposite scissor)
-        // E: left knee straightens, right knee bends
-        // K: left knee bends, right knee straightens
-        let leftHipAngle = LEFT_HIP_REST;
-        let rightHipAngle = RIGHT_HIP_REST;
-        let leftKneeAngle = LEFT_KNEE_REST;
-        let rightKneeAngle = RIGHT_KNEE_REST;
+        // --- Compute target angles from contraction levels ---
+        // Hip flexion: thigh swings forward/up (positive angle direction)
+        // Knee flexion: calf pulls back toward butt (negative angle direction)
+        const leftHipTarget = LEFT_HIP_REST + c.leftHip * HIP_FLEX_RANGE;
+        const rightHipTarget = RIGHT_HIP_REST + c.rightHip * HIP_FLEX_RANGE;
+        const leftKneeTarget = LEFT_KNEE_REST - c.leftKnee * KNEE_FLEX_RANGE;
+        const rightKneeTarget = RIGHT_KNEE_REST - c.rightKnee * KNEE_FLEX_RANGE;
 
-        if (keys.j && !keys.r) {
-            // J = SWAP legs: front leg swings back, back leg swings forward
-            // Targets the mirror of the rest position. Both targets are far
-            // from the constraint equilibrium (~0), producing real motion.
-            leftHipAngle = -HIP_SPLIT;                          // 0.35 -> -0.35 (left swings back)
-            rightHipAngle = HIP_SPLIT;                          // -0.35 -> +0.35 (right swings forward)
-        } else if (keys.r && !keys.j) {
-            // R = EXTEND split: both legs push further from center
-            leftHipAngle = LEFT_HIP_REST + HIP_DRIVE_ANGLE;   // +0.35 -> +0.70 (left more forward)
-            rightHipAngle = RIGHT_HIP_REST - HIP_DRIVE_ANGLE; // -0.35 -> -0.70 (right more back)
-        }
-
-        if (keys.e && !keys.k) {
-            leftKneeAngle = LEFT_KNEE_REST + KNEE_DRIVE_ANGLE;  // Left knee extends
-            rightKneeAngle = RIGHT_KNEE_REST - KNEE_DRIVE_ANGLE; // Right knee flexes
-        } else if (keys.k && !keys.e) {
-            leftKneeAngle = LEFT_KNEE_REST - KNEE_DRIVE_ANGLE;  // Left knee flexes
-            rightKneeAngle = RIGHT_KNEE_REST + KNEE_DRIVE_ANGLE; // Right knee extends
-        }
-
-        // --- HIPS ---
-        if (anyHipKey) {
-            driveJoint(torso, leftThigh, leftHipAngle);
-            driveJoint(torso, rightThigh, rightHipAngle);
+        // --- LEFT HIP (J key) ---
+        if (c.leftHip > 0.01) {
+            driveJoint(torso, leftThigh, leftHipTarget, HIP_MOTOR_P, HIP_MOTOR_D, HIP_MOTOR_MAX);
         } else {
             lockJoint(torso, leftThigh, LEFT_HIP_REST);
+        }
+
+        // --- RIGHT HIP (R key) ---
+        if (c.rightHip > 0.01) {
+            driveJoint(torso, rightThigh, rightHipTarget, HIP_MOTOR_P, HIP_MOTOR_D, HIP_MOTOR_MAX);
+        } else {
             lockJoint(torso, rightThigh, RIGHT_HIP_REST);
         }
 
-        // --- KNEES ---
-        // When hips are active, knees go PASSIVE (soft) so legs can flex.
-        // When knees are active, they're driven to target angles.
-        // When nothing is active, knees are fully locked.
-        if (anyKneeKey) {
-            driveJoint(leftThigh, leftCalf, leftKneeAngle);
-            driveJoint(rightThigh, rightCalf, rightKneeAngle);
-        } else if (anyHipKey) {
+        // --- LEFT KNEE (E key) ---
+        // Active: drive toward flexed target
+        // Same-leg hip active but knee not: passive (allow thigh motion to flex knee naturally)
+        // All idle: locked rigid
+        if (c.leftKnee > 0.01) {
+            driveJoint(leftThigh, leftCalf, leftKneeTarget, KNEE_MOTOR_P, KNEE_MOTOR_D, KNEE_MOTOR_MAX);
+        } else if (c.leftHip > 0.01) {
             passiveJoint(leftThigh, leftCalf, LEFT_KNEE_REST);
-            passiveJoint(rightThigh, rightCalf, RIGHT_KNEE_REST);
         } else {
             lockJoint(leftThigh, leftCalf, LEFT_KNEE_REST);
+        }
+
+        // --- RIGHT KNEE (K key) ---
+        if (c.rightKnee > 0.01) {
+            driveJoint(rightThigh, rightCalf, rightKneeTarget, KNEE_MOTOR_P, KNEE_MOTOR_D, KNEE_MOTOR_MAX);
+        } else if (c.rightHip > 0.01) {
+            passiveJoint(rightThigh, rightCalf, RIGHT_KNEE_REST);
+        } else {
             lockJoint(rightThigh, rightCalf, RIGHT_KNEE_REST);
         }
 
         // --- ANKLES ---
-        // Passive when any key is active (allows foot to pivot on ground).
-        // Fully locked when idle.
-        if (anyPressed) {
+        // Passive on the leg that's being moved (allows foot to pivot).
+        // Locked on the support leg (maximizes ground contact force).
+        const leftActive = c.leftHip > 0.01 || c.leftKnee > 0.01;
+        const rightActive = c.rightHip > 0.01 || c.rightKnee > 0.01;
+
+        if (leftActive) {
             passiveJoint(leftCalf, leftFoot, LEFT_ANKLE_REST);
-            passiveJoint(rightCalf, rightFoot, RIGHT_ANKLE_REST);
         } else {
             lockJoint(leftCalf, leftFoot, LEFT_ANKLE_REST);
+        }
+
+        if (rightActive) {
+            passiveJoint(rightCalf, rightFoot, RIGHT_ANKLE_REST);
+        } else {
             lockJoint(rightCalf, rightFoot, RIGHT_ANKLE_REST);
         }
 
-        // --- Enforce angle limits ---
+        // --- Enforce angle limits (human body range of motion) ---
         enforceAngleLimit(torso, leftThigh, HIP_MIN_ANGLE, HIP_MAX_ANGLE);
         enforceAngleLimit(torso, rightThigh, HIP_MIN_ANGLE, HIP_MAX_ANGLE);
         enforceAngleLimit(leftThigh, leftCalf, KNEE_MIN_ANGLE, KNEE_MAX_ANGLE);
         enforceAngleLimit(rightThigh, rightCalf, KNEE_MIN_ANGLE, KNEE_MAX_ANGLE);
         enforceAngleLimit(leftCalf, leftFoot, ANKLE_MIN_ANGLE, ANKLE_MAX_ANGLE);
         enforceAngleLimit(rightCalf, rightFoot, ANKLE_MIN_ANGLE, ANKLE_MAX_ANGLE);
+
+        // --- Extra foot gravity for ground contact ---
+        Body.applyForce(leftFoot, leftFoot.position, { x: 0, y: FOOT_GRAVITY_BOOST });
+        Body.applyForce(rightFoot, rightFoot.position, { x: 0, y: FOOT_GRAVITY_BOOST });
     }
 
     // Check if the runner has fallen

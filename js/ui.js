@@ -218,7 +218,7 @@ const UI = (function() {
         ctx.textAlign = 'left';
         ctx.fillStyle = 'rgba(255,255,255,0.2)';
         ctx.font = '9px "Courier New", monospace';
-        ctx.fillText('v0.8', 6, canvasHeight - 6);
+        ctx.fillText('v0.9', 6, canvasHeight - 6);
 
         // Control indicators at bottom
         renderControlIndicators(ctx, canvasWidth, canvasHeight, keys);
