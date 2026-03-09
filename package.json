@@ -1,0 +1,12 @@
+{
+  "name": "jrek",
+  "version": "1.0.0",
+  "description": "JREK - A QWOP-style ragdoll running game set on the Western States 100 course",
+  "private": true,
+  "scripts": {
+    "test:physics": "node test-physics.js"
+  },
+  "devDependencies": {
+    "puppeteer": "^24.38.0"
+  }
+}

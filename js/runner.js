@@ -2,16 +2,12 @@
  * JREK Runner - Ragdoll physics body for Scott Jurek
  * Built with Matter.js rigid bodies and constraints
  *
- * Physics: Authentic QWOP-style joint motor simulation.
- * Each key pair (J/R for hips, E/K for knees) drives BOTH legs
- * in opposite directions, exactly like QWOP's Q/W and O/P.
- *
- * Key mechanics:
- * - Joint motors target an angular velocity, limited by max impulse
- * - When no key is pressed, motors brake (resist rotation = stiff joints)
- * - No active torso stabilization — balance from coordinated leg motion
- * - Very heavy feet provide passive pendulum stability
- * - Joint angle limits prevent unrealistic hyperextension
+ * Physics: QWOP-style paired joint motors.
+ * - Body is RIGID at rest (joints locked, no collapse)
+ * - J/R drive hips only (knees stay locked)
+ * - E/K drive knees only (hips stay locked)
+ * - Ankles always locked
+ * - Split stance start: legs apart, knees slightly bent, feet on ground
  */
 
 const Runner = (function() {
@@ -29,48 +25,80 @@ const Runner = (function() {
     const FOOT_W = 22 * SCALE;
     const FOOT_H = 7 * SCALE;
 
+    // === SPLIT STANCE GEOMETRY ===
+    const HIP_SPLIT = 0.35;    // ~20 deg each leg from vertical
+    const KNEE_BEND = 0.12;    // Slight bend at each knee
+
+    // Height from torso center to bottom of front foot (for spawn positioning)
+    const STANCE_HEIGHT = Math.round(
+        TORSO_H / 2
+        + Math.cos(HIP_SPLIT) * UPPER_LEG_H
+        + Math.cos(HIP_SPLIT - KNEE_BEND) * LOWER_LEG_H
+        + FOOT_H
+    );
+
     // === MASS DISTRIBUTION ===
-    // Heavy torso = inverted pendulum that wants to fall.
-    // Moderate feet = enough to anchor but NOT catapult the body.
     const TORSO_DENSITY = 0.006;
     const LIMB_DENSITY = 0.001;
-    const FOOT_DENSITY = 0.004;     // 4x limb (was 20x, which launched the body)
+    const FOOT_DENSITY = 0.004;
     const HEAD_DENSITY = 0.0005;
 
     // === SURFACE FRICTION ===
     const BODY_FRICTION = 0.6;
     const BODY_RESTITUTION = 0.01;
-    const FOOT_FRICTION = 3.0;      // High grip but not insane
+    const FOOT_FRICTION = 3.0;
 
     // === JOINT MOTOR PARAMETERS ===
-    // Motors use body.torque (like Box2D revolute motors).
-    // High brake torque = stiff joints when no keys pressed = runner can stand.
-    // Active torque must overcome braking + gravity = feels heavy like QWOP.
-    const HIP_MOTOR_SPEED = 0.12;   // Target angular velocity (rad/frame)
+    const HIP_MOTOR_SPEED = 0.12;
     const KNEE_MOTOR_SPEED = 0.12;
-    const HIP_MAX_TORQUE = 2.5;     // Strong enough to swing legs against gravity
+    const HIP_MAX_TORQUE = 2.5;
     const KNEE_MAX_TORQUE = 2.0;
-    const BRAKE_TORQUE = 2.0;       // Very stiff brakes = runner stands when idle
-    const MOTOR_GAIN = 8.0;         // P-controller gain
+    const BRAKE_TORQUE = 3.0;
+    const MOTOR_GAIN = 8.0;
+
+    // === JOINT LOCKING ===
+    // Kills relative angular velocity between two connected bodies.
+    // At LOCK_RATE=0.95, joints lose 95% of relative rotation each frame.
+    // This makes them effectively rigid without fighting the physics engine.
+    const LOCK_RATE = 0.95;
 
     // === JOINT ANGLE LIMITS ===
-    const HIP_MIN_ANGLE = -1.0;     // ~-57 deg (leg behind torso)
-    const HIP_MAX_ANGLE = 1.0;      // ~+57 deg (leg in front)
-    const KNEE_MIN_ANGLE = -1.8;    // ~-103 deg (heel toward butt)
-    const KNEE_MAX_ANGLE = 0.05;    // Barely past straight
-    const ANKLE_MIN_ANGLE = -0.2;   // Nearly rigid
-    const ANKLE_MAX_ANGLE = 0.2;    // Nearly rigid
+    const HIP_MIN_ANGLE = -1.0;
+    const HIP_MAX_ANGLE = 1.0;
+    const KNEE_MIN_ANGLE = -1.8;
+    const KNEE_MAX_ANGLE = 0.05;
+    const ANKLE_MIN_ANGLE = -0.2;
+    const ANKLE_MAX_ANGLE = 0.2;
 
     // === DAMPING ===
-    const ANGULAR_DAMPING = 0.96;   // Moderate damping - not too floaty, not too dead
+    const ANGULAR_DAMPING = 0.96;
+    const MAX_ANGULAR_VEL = 0.3;
 
     // Constraint stiffness
     const JOINT_STIFFNESS = 1.0;
     const JOINT_DAMPING = 0.5;
 
+    // === TORSO STABILIZATION ===
+    // Simple PD to keep torso upright. Weak enough that movement is
+    // precarious, strong enough that idle stance holds for several seconds.
+    const TORSO_STAB_IDLE = 0.30;
+    const TORSO_STAB_ACTIVE = 0.04;
+    const TORSO_DAMP_IDLE = 0.85;
+    const TORSO_DAMP_ACTIVE = 0.95;
+
+    // === ROLLING CARTWHEEL EASTER EGG ===
+    const ROLL_TORQUE = 0.6;
+    const ROLL_FORWARD_FORCE = 0.001;
+
     // Collision categories
     const RUNNER_CATEGORY = 0x0002;
     const GROUND_CATEGORY = 0x0001;
+
+    // --- Joint lock: kill relative angular velocity ---
+    function lockJoint(parent, child) {
+        const relAngVel = child.angularVelocity - parent.angularVelocity;
+        Body.setAngularVelocity(child, child.angularVelocity - relAngVel * LOCK_RATE);
+    }
 
     function create(x, y) {
         const parts = {};
@@ -95,8 +123,7 @@ const Runner = (function() {
             label: 'head',
         });
 
-        // TORSO — heavy, pure ragdoll. Low air friction so it falls naturally.
-        // No hidden stabilization -- this is the inverted pendulum.
+        // TORSO
         parts.torso = Bodies.rectangle(x, y, TORSO_W, TORSO_H, {
             ...bodyOptions,
             density: TORSO_DENSITY,
@@ -104,47 +131,68 @@ const Runner = (function() {
             frictionAir: 0.015,
         });
 
-        // LEFT UPPER LEG (thigh)
-        parts.leftThigh = Bodies.rectangle(
-            x - 3, y + TORSO_H / 2 + UPPER_LEG_H / 2,
-            UPPER_LEG_W, UPPER_LEG_H,
-            { ...bodyOptions, density: LIMB_DENSITY, label: 'leftThigh' }
-        );
+        // === SPLIT STANCE BODY POSITIONING ===
+        // Each body part is placed along its kinematic chain using trig.
+        // Left leg goes forward, right leg goes backward.
 
-        // RIGHT UPPER LEG (thigh)
-        parts.rightThigh = Bodies.rectangle(
-            x + 3, y + TORSO_H / 2 + UPPER_LEG_H / 2,
-            UPPER_LEG_W, UPPER_LEG_H,
-            { ...bodyOptions, density: LIMB_DENSITY, label: 'rightThigh' }
-        );
+        const leftHipX = x - 3;
+        const leftHipY = y + TORSO_H / 2;
+        const rightHipX = x + 3;
+        const rightHipY = y + TORSO_H / 2;
 
-        // LEFT LOWER LEG (calf)
-        parts.leftCalf = Bodies.rectangle(
-            x - 3, y + TORSO_H / 2 + UPPER_LEG_H + LOWER_LEG_H / 2,
-            LOWER_LEG_W, LOWER_LEG_H,
-            { ...bodyOptions, density: LIMB_DENSITY, label: 'leftCalf' }
-        );
+        // LEFT THIGH: angled forward by HIP_SPLIT
+        const ltAngle = HIP_SPLIT;
+        const ltCenterX = leftHipX + Math.sin(ltAngle) * UPPER_LEG_H / 2;
+        const ltCenterY = leftHipY + Math.cos(ltAngle) * UPPER_LEG_H / 2;
+        parts.leftThigh = Bodies.rectangle(ltCenterX, ltCenterY, UPPER_LEG_W, UPPER_LEG_H, {
+            ...bodyOptions, density: LIMB_DENSITY, label: 'leftThigh', angle: ltAngle
+        });
 
-        // RIGHT LOWER LEG (calf)
-        parts.rightCalf = Bodies.rectangle(
-            x + 3, y + TORSO_H / 2 + UPPER_LEG_H + LOWER_LEG_H / 2,
-            LOWER_LEG_W, LOWER_LEG_H,
-            { ...bodyOptions, density: LIMB_DENSITY, label: 'rightCalf' }
-        );
+        // RIGHT THIGH: angled backward by -HIP_SPLIT
+        const rtAngle = -HIP_SPLIT;
+        const rtCenterX = rightHipX + Math.sin(rtAngle) * UPPER_LEG_H / 2;
+        const rtCenterY = rightHipY + Math.cos(rtAngle) * UPPER_LEG_H / 2;
+        parts.rightThigh = Bodies.rectangle(rtCenterX, rtCenterY, UPPER_LEG_W, UPPER_LEG_H, {
+            ...bodyOptions, density: LIMB_DENSITY, label: 'rightThigh', angle: rtAngle
+        });
 
-        // LEFT FOOT — very heavy for stability
-        parts.leftFoot = Bodies.rectangle(
-            x - 3, y + TORSO_H / 2 + UPPER_LEG_H + LOWER_LEG_H + FOOT_H / 2,
-            FOOT_W, FOOT_H,
-            { ...bodyOptions, density: FOOT_DENSITY, friction: FOOT_FRICTION, label: 'leftFoot' }
-        );
+        // Knee positions (bottom of thighs)
+        const leftKneeX = leftHipX + Math.sin(ltAngle) * UPPER_LEG_H;
+        const leftKneeY = leftHipY + Math.cos(ltAngle) * UPPER_LEG_H;
+        const rightKneeX = rightHipX + Math.sin(rtAngle) * UPPER_LEG_H;
+        const rightKneeY = rightHipY + Math.cos(rtAngle) * UPPER_LEG_H;
 
-        // RIGHT FOOT — very heavy for stability
-        parts.rightFoot = Bodies.rectangle(
-            x + 3, y + TORSO_H / 2 + UPPER_LEG_H + LOWER_LEG_H + FOOT_H / 2,
-            FOOT_W, FOOT_H,
-            { ...bodyOptions, density: FOOT_DENSITY, friction: FOOT_FRICTION, label: 'rightFoot' }
-        );
+        // LEFT CALF: thigh angle minus knee bend (bends back relative to thigh)
+        const lcAngle = ltAngle - KNEE_BEND;
+        const lcCenterX = leftKneeX + Math.sin(lcAngle) * LOWER_LEG_H / 2;
+        const lcCenterY = leftKneeY + Math.cos(lcAngle) * LOWER_LEG_H / 2;
+        parts.leftCalf = Bodies.rectangle(lcCenterX, lcCenterY, LOWER_LEG_W, LOWER_LEG_H, {
+            ...bodyOptions, density: LIMB_DENSITY, label: 'leftCalf', angle: lcAngle
+        });
+
+        // RIGHT CALF: thigh angle minus knee bend
+        const rcAngle = rtAngle - KNEE_BEND;
+        const rcCenterX = rightKneeX + Math.sin(rcAngle) * LOWER_LEG_H / 2;
+        const rcCenterY = rightKneeY + Math.cos(rcAngle) * LOWER_LEG_H / 2;
+        parts.rightCalf = Bodies.rectangle(rcCenterX, rcCenterY, LOWER_LEG_W, LOWER_LEG_H, {
+            ...bodyOptions, density: LIMB_DENSITY, label: 'rightCalf', angle: rcAngle
+        });
+
+        // Ankle positions (bottom of calves)
+        const leftAnkleX = leftKneeX + Math.sin(lcAngle) * LOWER_LEG_H;
+        const leftAnkleY = leftKneeY + Math.cos(lcAngle) * LOWER_LEG_H;
+        const rightAnkleX = rightKneeX + Math.sin(rcAngle) * LOWER_LEG_H;
+        const rightAnkleY = rightKneeY + Math.cos(rcAngle) * LOWER_LEG_H;
+
+        // LEFT FOOT: flat on ground (angle 0)
+        parts.leftFoot = Bodies.rectangle(leftAnkleX, leftAnkleY + FOOT_H / 2, FOOT_W, FOOT_H, {
+            ...bodyOptions, density: FOOT_DENSITY, friction: FOOT_FRICTION, label: 'leftFoot'
+        });
+
+        // RIGHT FOOT: flat on ground (angle 0)
+        parts.rightFoot = Bodies.rectangle(rightAnkleX, rightAnkleY + FOOT_H / 2, FOOT_W, FOOT_H, {
+            ...bodyOptions, density: FOOT_DENSITY, friction: FOOT_FRICTION, label: 'rightFoot'
+        });
 
         // === CONSTRAINTS (pin joints) ===
 
@@ -160,7 +208,7 @@ const Runner = (function() {
             label: 'neck',
         }));
 
-        // Head stabilizer (keeps head above torso)
+        // Head stabilizer
         constraints.push(Constraint.create({
             bodyA: parts.head,
             pointA: { x: 0, y: 0 },
@@ -245,18 +293,17 @@ const Runner = (function() {
         }));
 
         // === STRUCTURAL BRACES ===
-        // Matter.js constraints are springs, not rigid joints (unlike Box2D).
-        // Without these braces, the constraint springs stretch under the
-        // torso's weight and the whole body collapses into a pile.
+        // Matter.js constraints are springs, not rigid joints.
+        // These prevent positional collapse under gravity.
 
-        // Full-leg braces: prevent legs from folding under torso weight
+        // Full-leg braces: torso-hip to foot
         constraints.push(Constraint.create({
             bodyA: parts.torso,
             pointA: { x: -3, y: TORSO_H / 2 },
             bodyB: parts.leftFoot,
             pointB: { x: 0, y: 0 },
-            stiffness: 0.12,
-            damping: 0.2,
+            stiffness: 0.2,
+            damping: 0.3,
             length: UPPER_LEG_H + LOWER_LEG_H + FOOT_H / 2,
             label: 'leftFullLeg',
         }));
@@ -266,8 +313,8 @@ const Runner = (function() {
             pointA: { x: 3, y: TORSO_H / 2 },
             bodyB: parts.rightFoot,
             pointB: { x: 0, y: 0 },
-            stiffness: 0.12,
-            damping: 0.2,
+            stiffness: 0.2,
+            damping: 0.3,
             length: UPPER_LEG_H + LOWER_LEG_H + FOOT_H / 2,
             label: 'rightFullLeg',
         }));
@@ -311,39 +358,23 @@ const Runner = (function() {
     }
 
     // === JOINT MOTOR (TORQUE-BASED) ===
-    // Simulates a Box2D revolute joint motor using body.torque.
-    // Unlike setAngularVelocity (which bypasses physics), torque creates
-    // angular ACCELERATION that must fight gravity and inertia.
-    // This is why QWOP feels heavy -- motors can't overpower gravity easily.
     function applyJointMotor(parent, child, targetSpeed, maxTorque) {
         const relAngVel = child.angularVelocity - parent.angularVelocity;
-
-        // P-controller: torque proportional to velocity error
         let torque = (targetSpeed - relAngVel) * MOTOR_GAIN;
-
-        // Clamp to max motor torque (this is the key limiter)
         if (torque > maxTorque) torque = maxTorque;
         if (torque < -maxTorque) torque = -maxTorque;
-
-        // Newton's 3rd law: equal and opposite torques.
-        // The physics engine handles the rest -- lighter bodies accelerate
-        // more because angular_accel = torque / inertia.
         child.torque += torque;
         parent.torque -= torque;
     }
 
     // === ANGLE LIMIT ENFORCEMENT ===
-    // Matter.js doesn't have native angle limits on constraints.
-    // This manually prevents joints from exceeding their range of motion.
     function enforceAngleLimit(parent, child, minAngle, maxAngle) {
         let relAngle = child.angle - parent.angle;
-        // Normalize to [-PI, PI]
         while (relAngle > Math.PI) relAngle -= 2 * Math.PI;
         while (relAngle < -Math.PI) relAngle += 2 * Math.PI;
 
         if (relAngle < minAngle) {
             const overshoot = minAngle - relAngle;
-            // Strong corrective push
             Body.setAngularVelocity(child, child.angularVelocity + overshoot * 0.5);
             Body.setAngularVelocity(parent, parent.angularVelocity - overshoot * 0.15);
         }
@@ -355,34 +386,21 @@ const Runner = (function() {
     }
 
     /**
-     * Core control function — called every physics frame.
+     * Core control function -- called every physics frame.
      *
-     * QWOP-style paired controls:
-     * - J: left hip backward + right hip forward (like QWOP's Q)
-     * - R: left hip forward + right hip backward (like QWOP's W)
-     * - E: left knee one direction + right knee other (like QWOP's O)
-     * - K: opposite of E (like QWOP's P)
-     *
-     * When no key is pressed for a joint pair, the motor brakes
-     * (drives speed toward 0), keeping joints stiff.
+     * SIMPLIFIED CONTROLS:
+     * - J/R = hips only (knees LOCKED, don't bend)
+     * - E/K = knees only (hips LOCKED, don't move)
+     * - No keys = ALL joints locked rigid
+     * - All four = rolling easter egg
      */
-    // === TORSO STABILIZATION ===
-    // Matter.js can't do rigid pin joints like Box2D, so we need mild
-    // stabilization to prevent instant collapse. This weakens when keys
-    // are pressed, making the runner vulnerable during movement.
-    const TORSO_STAB_IDLE = 0.6;     // Strong uprighting when idle
-    const TORSO_STAB_ACTIVE = 0.08;  // Much weaker when keys pressed (4x wobbier = can fall)
-    const MAX_ANGULAR_VEL = 0.25;    // Clamp angular velocity to prevent spinning
-
-    // === ROLLING CARTWHEEL EASTER EGG ===
-    const ROLL_TORQUE = 0.6;
-    const ROLL_FORWARD_FORCE = 0.001;
-
     function applyControls(runner, keys) {
         const { torso, leftThigh, rightThigh, leftCalf, rightCalf, leftFoot, rightFoot } = runner.parts;
 
         const allPressed = keys.j && keys.r && keys.e && keys.k;
         const anyPressed = keys.j || keys.r || keys.e || keys.k;
+        const anyHipKey = keys.j || keys.r;
+        const anyKneeKey = keys.e || keys.k;
         runner.rolling = allPressed;
 
         // --- Angular damping + velocity clamping on all bodies ---
@@ -390,34 +408,31 @@ const Runner = (function() {
             const part = runner.parts[key];
             const damping = (allPressed && part === torso) ? 0.99 : ANGULAR_DAMPING;
             let av = part.angularVelocity * damping;
-            // Clamp angular velocity to prevent wild spinning/launching
             if (!allPressed) {
                 av = Math.max(-MAX_ANGULAR_VEL, Math.min(MAX_ANGULAR_VEL, av));
             }
             Body.setAngularVelocity(part, av);
         }
 
-        // --- Torso stabilization (Matter.js compromise) ---
-        // Gently pushes torso toward upright. Much weaker when keys pressed.
+        // --- Torso stabilization (PD controller) ---
+        // Keeps the torso upright. Weaker when keys are pressed so
+        // movement is precarious and falling is possible.
         if (!allPressed) {
             const stabStrength = anyPressed ? TORSO_STAB_ACTIVE : TORSO_STAB_IDLE;
-            const torsoAngleError = torso.angle;
+            const dampFactor = anyPressed ? TORSO_DAMP_ACTIVE : TORSO_DAMP_IDLE;
             Body.setAngularVelocity(torso,
-                torso.angularVelocity - torsoAngleError * stabStrength
+                torso.angularVelocity * dampFactor - torso.angle * stabStrength
             );
         }
 
         // === Easter egg: all four keys = rolling cartwheel ===
         if (allPressed) {
-            // Apply spin torque to torso (torque-based, not velocity)
             torso.torque += ROLL_TORQUE;
-            // Gentle forward push
             Body.applyForce(torso, torso.position, {
                 x: ROLL_FORWARD_FORCE,
                 y: 0,
             });
 
-            // Windmill legs via torque
             const phase = Math.sin(torso.angle * 2);
             applyJointMotor(torso, leftThigh, phase > 0 ? HIP_MOTOR_SPEED : -HIP_MOTOR_SPEED, HIP_MAX_TORQUE);
             applyJointMotor(torso, rightThigh, phase > 0 ? -HIP_MOTOR_SPEED : HIP_MOTOR_SPEED, HIP_MAX_TORQUE);
@@ -426,7 +441,6 @@ const Runner = (function() {
             applyJointMotor(leftCalf, leftFoot, 0, BRAKE_TORQUE);
             applyJointMotor(rightCalf, rightFoot, 0, BRAKE_TORQUE);
 
-            // Wider angle limits during roll
             enforceAngleLimit(torso, leftThigh, -2.2, 2.2);
             enforceAngleLimit(torso, rightThigh, -2.2, 2.2);
             enforceAngleLimit(leftThigh, leftCalf, -2.5, 0.5);
@@ -437,8 +451,7 @@ const Runner = (function() {
             return;
         }
 
-        // --- Determine target motor speeds ---
-        // Each key drives BOTH legs of the pair in opposite directions.
+        // --- Determine motor targets ---
         let leftHipTarget = 0;
         let rightHipTarget = 0;
         let leftKneeTarget = 0;
@@ -460,17 +473,41 @@ const Runner = (function() {
             rightKneeTarget = KNEE_MOTOR_SPEED;
         }
 
-        // --- Apply joint motors (torque-based) ---
-        const anyHipKey = keys.j || keys.r;
-        const anyKneeKey = keys.e || keys.k;
-        applyJointMotor(torso, leftThigh, leftHipTarget, anyHipKey ? HIP_MAX_TORQUE : BRAKE_TORQUE);
-        applyJointMotor(torso, rightThigh, rightHipTarget, anyHipKey ? HIP_MAX_TORQUE : BRAKE_TORQUE);
-        applyJointMotor(leftThigh, leftCalf, leftKneeTarget, anyKneeKey ? KNEE_MAX_TORQUE : BRAKE_TORQUE);
-        applyJointMotor(rightThigh, rightCalf, rightKneeTarget, anyKneeKey ? KNEE_MAX_TORQUE : BRAKE_TORQUE);
+        // --- Apply motors for active joints, LOCK inactive joints ---
 
-        // Ankles: always brake
-        applyJointMotor(leftCalf, leftFoot, 0, BRAKE_TORQUE);
-        applyJointMotor(rightCalf, rightFoot, 0, BRAKE_TORQUE);
+        if (anyHipKey) {
+            // Drive hips
+            applyJointMotor(torso, leftThigh, leftHipTarget, HIP_MAX_TORQUE);
+            applyJointMotor(torso, rightThigh, rightHipTarget, HIP_MAX_TORQUE);
+        } else {
+            // Lock hips rigid
+            lockJoint(torso, leftThigh);
+            lockJoint(torso, rightThigh);
+        }
+
+        if (anyKneeKey) {
+            // Drive knees
+            applyJointMotor(leftThigh, leftCalf, leftKneeTarget, KNEE_MAX_TORQUE);
+            applyJointMotor(rightThigh, rightCalf, rightKneeTarget, KNEE_MAX_TORQUE);
+        } else {
+            // Lock knees rigid
+            lockJoint(leftThigh, leftCalf);
+            lockJoint(rightThigh, rightCalf);
+        }
+
+        // Cross-locking: when hips are active, lock knees too (and vice versa)
+        if (anyHipKey && !anyKneeKey) {
+            lockJoint(leftThigh, leftCalf);
+            lockJoint(rightThigh, rightCalf);
+        }
+        if (anyKneeKey && !anyHipKey) {
+            lockJoint(torso, leftThigh);
+            lockJoint(torso, rightThigh);
+        }
+
+        // Ankles: ALWAYS locked rigid
+        lockJoint(leftCalf, leftFoot);
+        lockJoint(rightCalf, rightFoot);
 
         // --- Enforce angle limits ---
         enforceAngleLimit(torso, leftThigh, HIP_MIN_ANGLE, HIP_MAX_ANGLE);
@@ -483,7 +520,6 @@ const Runner = (function() {
 
     // Check if the runner has fallen
     function checkFallen(runner, groundY) {
-        // Can't fall while doing the barrel roll
         if (runner.rolling) return false;
 
         const head = runner.parts.head;
@@ -491,7 +527,7 @@ const Runner = (function() {
 
         const torsoAngle = Math.abs(torso.angle);
         const headLow = head.position.y > groundY - 15;
-        const torsoTilted = torsoAngle > 1.4; // ~80 degrees
+        const torsoTilted = torsoAngle > 1.4;
 
         if ((headLow || torsoTilted) && !runner.fallen) {
             runner.fallen = true;
@@ -516,8 +552,6 @@ const Runner = (function() {
     }
 
     // Draw the runner on canvas - Classic Jurek Western States look
-    // Reference: White Montrail/Patagonia crop top, CLIF cap, black shorts,
-    // handheld bottle, long hair, clean-shaven, yellow wristband
     function render(ctx, runner, cameraX, cameraY) {
         const parts = runner.parts;
         const ox = -cameraX;
@@ -529,21 +563,20 @@ const Runner = (function() {
         // Color palette - Jurek at Western States circa 2003-2005
         const skinColor = '#c49a6c';
         const skinShadow = '#a8825a';
-        const cropTopColor = '#f0ebe3'; // White crop top
+        const cropTopColor = '#f0ebe3';
         const cropTopShadow = '#d8d0c4';
-        const shortsColor = '#1a1a1a'; // Black shorts
-        const gearBeltColor = '#333333'; // Gear belt/pack
-        const shoeColor = '#4a6741'; // Montrail green trail shoes
+        const shortsColor = '#1a1a1a';
+        const gearBeltColor = '#333333';
+        const shoeColor = '#4a6741';
         const shoeSoleColor = '#1a1a1a';
-        const capRedColor = '#cc2222'; // CLIF red cap panel
-        const capWhiteColor = '#e8e0d4'; // Cap mesh
+        const capRedColor = '#cc2222';
+        const capWhiteColor = '#e8e0d4';
         const capBrimColor = '#2a2a2a';
-        const hairColor = '#3b2507'; // Long brown hair
-        const wristbandColor = '#e6cc00'; // Yellow wristband
+        const hairColor = '#3b2507';
+        const wristbandColor = '#e6cc00';
         const watchColor = '#222222';
-        const bottleColor = '#e8e8e8'; // White handheld bottle
+        const bottleColor = '#e8e8e8';
 
-        // Helper: draw a rotated rectangle
         function drawBodyPart(body, w, h, color) {
             ctx.save();
             ctx.translate(body.position.x, body.position.y);
@@ -555,20 +588,16 @@ const Runner = (function() {
             ctx.restore();
         }
 
-        // Helper: draw a shoe
         function drawShoe(foot, isBack) {
             ctx.save();
             ctx.translate(foot.position.x, foot.position.y);
             ctx.rotate(foot.angle);
-            // Shoe body
             ctx.fillStyle = shoeColor;
             ctx.beginPath();
             ctx.roundRect(-FOOT_W / 2, -FOOT_H / 2, FOOT_W, FOOT_H, 3);
             ctx.fill();
-            // Sole
             ctx.fillStyle = shoeSoleColor;
             ctx.fillRect(-FOOT_W / 2, FOOT_H / 2 - 2, FOOT_W, 2);
-            // Lace detail
             if (!isBack) {
                 ctx.strokeStyle = '#cccccc';
                 ctx.lineWidth = 0.7;
@@ -592,20 +621,17 @@ const Runner = (function() {
         ctx.translate(parts.torso.position.x, parts.torso.position.y);
         ctx.rotate(parts.torso.angle);
 
-        // Full torso skin
         ctx.fillStyle = skinColor;
         ctx.beginPath();
         ctx.roundRect(-TORSO_W / 2, -TORSO_H / 2, TORSO_W, TORSO_H, 4);
         ctx.fill();
 
-        // White crop top (upper ~50% of torso, showing midriff)
         const cropHeight = TORSO_H * 0.50;
         ctx.fillStyle = cropTopColor;
         ctx.beginPath();
         ctx.roundRect(-TORSO_W / 2 - 1, -TORSO_H / 2, TORSO_W + 2, cropHeight, [4, 4, 0, 0]);
         ctx.fill();
 
-        // Crop top wrinkle/shadow lines for texture
         ctx.strokeStyle = cropTopShadow;
         ctx.lineWidth = 0.6;
         ctx.beginPath();
@@ -615,7 +641,6 @@ const Runner = (function() {
         ctx.lineTo(TORSO_W / 5, -TORSO_H / 2 + cropHeight * 0.55);
         ctx.stroke();
 
-        // Crop top hem (slightly ragged/loose)
         ctx.strokeStyle = '#c0b8aa';
         ctx.lineWidth = 1.2;
         ctx.beginPath();
@@ -623,20 +648,15 @@ const Runner = (function() {
         ctx.lineTo(TORSO_W / 2 + 1, -TORSO_H / 2 + cropHeight + 1);
         ctx.stroke();
 
-        // Exposed midriff area (skin is already drawn)
-
-        // Black shorts with gear belt - longer, extending past torso bottom
         const shortsTop = TORSO_H / 4;
-        const shortsLength = TORSO_H / 2 - shortsTop + 8; // +8px extends past torso
+        const shortsLength = TORSO_H / 2 - shortsTop + 8;
         ctx.fillStyle = shortsColor;
         ctx.beginPath();
         ctx.roundRect(-TORSO_W / 2 - 2, shortsTop, TORSO_W + 4, shortsLength, [0, 0, 3, 3]);
         ctx.fill();
 
-        // Gear belt at top of shorts
         ctx.fillStyle = gearBeltColor;
         ctx.fillRect(-TORSO_W / 2 - 2, shortsTop - 1, TORSO_W + 4, 4);
-        // Small gear pouch on the belt
         ctx.fillStyle = '#444444';
         ctx.fillRect(TORSO_W / 2 - 2, shortsTop - 2, 5, 6);
 
@@ -647,24 +667,20 @@ const Runner = (function() {
         drawBodyPart(parts.rightCalf, LOWER_LEG_W, LOWER_LEG_H, skinColor);
         drawShoe(parts.rightFoot, false);
 
-        // -- HANDHELD BOTTLE (attached to right hand area, near torso bottom) --
+        // -- HANDHELD BOTTLE --
         ctx.save();
         ctx.translate(parts.torso.position.x, parts.torso.position.y);
         ctx.rotate(parts.torso.angle);
-        // Bottle in right hand
         ctx.fillStyle = bottleColor;
         ctx.beginPath();
         ctx.roundRect(TORSO_W / 2 - 2, -2, 5, 10, 2);
         ctx.fill();
-        // Bottle cap
         ctx.fillStyle = '#aaaaaa';
         ctx.beginPath();
         ctx.arc(TORSO_W / 2 + 0.5, -2, 2.5, Math.PI, 0);
         ctx.fill();
-        // Yellow wristband on the same side
         ctx.fillStyle = wristbandColor;
         ctx.fillRect(TORSO_W / 2 - 3, 8, 7, 3);
-        // Watch on left wrist area
         ctx.fillStyle = watchColor;
         ctx.fillRect(-TORSO_W / 2 - 3, 6, 5, 4);
         ctx.fillStyle = '#335533';
@@ -676,34 +692,25 @@ const Runner = (function() {
         ctx.translate(parts.head.position.x, parts.head.position.y);
         ctx.rotate(parts.head.angle);
 
-        // Long hair flowing behind (Jurek's signature long hair)
         ctx.fillStyle = hairColor;
         ctx.beginPath();
-        // Hair behind head
         ctx.arc(0, 0, HEAD_RADIUS + 2, Math.PI * 0.6, Math.PI * 1.4);
-        // Long hair flowing down/back
         ctx.quadraticCurveTo(-HEAD_RADIUS - 4, HEAD_RADIUS + 6, -HEAD_RADIUS - 2, HEAD_RADIUS + 12);
         ctx.quadraticCurveTo(-HEAD_RADIUS + 2, HEAD_RADIUS + 10, -HEAD_RADIUS + 4, HEAD_RADIUS + 4);
         ctx.fill();
 
-        // Head circle (skin)
         ctx.fillStyle = skinColor;
         ctx.beginPath();
         ctx.arc(0, 0, HEAD_RADIUS, 0, Math.PI * 2);
         ctx.fill();
 
-        // CLIF trucker cap - centered on top of head
-        // Cap dome (red front panel) - covers top of head from back to front
         ctx.fillStyle = capRedColor;
         ctx.beginPath();
-        // Arc sitting on top of the head, centered
         ctx.arc(0, -2, HEAD_RADIUS + 1, Math.PI * 1.15, Math.PI * 1.85);
-        // Crown bump
         ctx.quadraticCurveTo(0, -HEAD_RADIUS - 6, 0, -HEAD_RADIUS - 4);
         ctx.closePath();
         ctx.fill();
 
-        // Cap mesh (white/grey back panels)
         ctx.fillStyle = capWhiteColor;
         ctx.beginPath();
         ctx.arc(0, -2, HEAD_RADIUS + 1, Math.PI * 0.15, Math.PI * 0.35);
@@ -712,7 +719,6 @@ const Runner = (function() {
         ctx.closePath();
         ctx.fill();
 
-        // Cap brim - pointing right (forward), centered on forehead
         ctx.fillStyle = capBrimColor;
         ctx.beginPath();
         ctx.moveTo(HEAD_RADIUS * 0.5, -HEAD_RADIUS * 0.5);
@@ -721,20 +727,17 @@ const Runner = (function() {
         ctx.closePath();
         ctx.fill();
 
-        // CLIF text on cap front (tiny)
         ctx.fillStyle = '#ffffff';
         ctx.font = 'bold 5px Arial';
         ctx.textAlign = 'center';
         ctx.fillText('CLIF', 0, -HEAD_RADIUS + 2);
 
-        // Eyes
         ctx.fillStyle = '#1a1208';
         ctx.beginPath();
         ctx.arc(-4, -1, 1.8, 0, Math.PI * 2);
         ctx.arc(4, -1, 1.8, 0, Math.PI * 2);
         ctx.fill();
 
-        // Eyebrows (focused)
         ctx.strokeStyle = '#2a1a08';
         ctx.lineWidth = 1.3;
         ctx.beginPath();
@@ -744,7 +747,6 @@ const Runner = (function() {
         ctx.lineTo(6, -4);
         ctx.stroke();
 
-        // Nose (subtle line)
         ctx.strokeStyle = '#a07850';
         ctx.lineWidth = 0.8;
         ctx.beginPath();
@@ -752,21 +754,17 @@ const Runner = (function() {
         ctx.lineTo(1, 2);
         ctx.stroke();
 
-        // Mouth
         ctx.strokeStyle = '#1a1208';
         ctx.lineWidth = 1.5;
         ctx.beginPath();
         if (runner.fallen) {
-            // Yelling "MINNESOTA!!"
             ctx.arc(0, 5, 3.5, 0, Math.PI * 2);
             ctx.fillStyle = '#1a1208';
             ctx.fill();
         } else if (runner.rolling) {
-            // Manic grin during barrel roll
             ctx.moveTo(-5, 4);
             ctx.quadraticCurveTo(0, 9, 5, 4);
         } else {
-            // Determined grimace
             ctx.moveTo(-3, 5);
             ctx.lineTo(3, 5);
         }
@@ -807,5 +805,6 @@ const Runner = (function() {
         getCenter,
         render,
         TOTAL_HEIGHT: HEAD_RADIUS * 2 + TORSO_H + UPPER_LEG_H + LOWER_LEG_H + FOOT_H,
+        STANCE_HEIGHT,
     };
 })();

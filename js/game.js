@@ -198,7 +198,7 @@ if (!CanvasRenderingContext2D.prototype.roundRect) {
         // Higher gravity = heavier, more grounded feel. QWOP uses ~2x Earth gravity.
         // This makes the inverted pendulum (torso) fall harder, requiring precise control.
         engine = Engine.create({
-            gravity: { x: 0, y: 1.0 },
+            gravity: { x: 0, y: 0.55 },
             constraintIterations: 6,   // Stiffer joints (default: 2)
             positionIterations: 10,    // Better position solving (default: 6)
         });
@@ -239,6 +239,9 @@ if (!CanvasRenderingContext2D.prototype.roundRect) {
         keys.r = false;
         keys.e = false;
         keys.k = false;
+
+        // Debug hook: expose internals for automated testing
+        window._jrekDebug = { runner, engine, terrain, keys, gameState: () => gameState, Runner, Terrain };
     }
 
     function resetGame() {
