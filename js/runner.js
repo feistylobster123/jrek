@@ -244,8 +244,35 @@ const Runner = (function() {
             label: 'rightAnkle',
         }));
 
-        // === STRUCTURAL SAFETY NET ===
-        // Thigh cross-brace prevents doing the splits (unrealistic in Matter.js)
+        // === STRUCTURAL BRACES ===
+        // Matter.js constraints are springs, not rigid joints (unlike Box2D).
+        // Without these braces, the constraint springs stretch under the
+        // torso's weight and the whole body collapses into a pile.
+
+        // Full-leg braces: prevent legs from folding under torso weight
+        constraints.push(Constraint.create({
+            bodyA: parts.torso,
+            pointA: { x: -3, y: TORSO_H / 2 },
+            bodyB: parts.leftFoot,
+            pointB: { x: 0, y: 0 },
+            stiffness: 0.06,
+            damping: 0.15,
+            length: UPPER_LEG_H + LOWER_LEG_H + FOOT_H / 2,
+            label: 'leftFullLeg',
+        }));
+
+        constraints.push(Constraint.create({
+            bodyA: parts.torso,
+            pointA: { x: 3, y: TORSO_H / 2 },
+            bodyB: parts.rightFoot,
+            pointB: { x: 0, y: 0 },
+            stiffness: 0.06,
+            damping: 0.15,
+            length: UPPER_LEG_H + LOWER_LEG_H + FOOT_H / 2,
+            label: 'rightFullLeg',
+        }));
+
+        // Thigh cross-brace: prevents doing the splits
         constraints.push(Constraint.create({
             bodyA: parts.leftThigh,
             pointA: { x: 0, y: UPPER_LEG_H / 3 },
@@ -339,22 +366,39 @@ const Runner = (function() {
      * When no key is pressed for a joint pair, the motor brakes
      * (drives speed toward 0), keeping joints stiff.
      */
+    // === TORSO STABILIZATION ===
+    // Matter.js can't do rigid pin joints like Box2D, so we need mild
+    // stabilization to prevent instant collapse. This weakens when keys
+    // are pressed, making the runner vulnerable during movement.
+    const TORSO_STAB_IDLE = 0.12;    // Uprighting strength when no keys pressed
+    const TORSO_STAB_ACTIVE = 0.03;  // Much weaker when keys pressed
+
     // === ROLLING CARTWHEEL EASTER EGG ===
-    const ROLL_TORQUE = 0.6;          // Torque to spin the torso
-    const ROLL_FORWARD_FORCE = 0.001; // Small forward push
+    const ROLL_TORQUE = 0.6;
+    const ROLL_FORWARD_FORCE = 0.001;
 
     function applyControls(runner, keys) {
         const { torso, leftThigh, rightThigh, leftCalf, rightCalf, leftFoot, rightFoot } = runner.parts;
 
         const allPressed = keys.j && keys.r && keys.e && keys.k;
+        const anyPressed = keys.j || keys.r || keys.e || keys.k;
         runner.rolling = allPressed;
 
-        // --- Angular damping on all bodies (prevents perpetual spinning) ---
-        // Matter.js frictionAir only damps linear velocity, not angular.
+        // --- Angular damping on all bodies ---
         for (const key of Object.keys(runner.parts)) {
             const part = runner.parts[key];
             const damping = (allPressed && part === torso) ? 0.99 : ANGULAR_DAMPING;
             Body.setAngularVelocity(part, part.angularVelocity * damping);
+        }
+
+        // --- Torso stabilization (Matter.js compromise) ---
+        // Gently pushes torso toward upright. Much weaker when keys pressed.
+        if (!allPressed) {
+            const stabStrength = anyPressed ? TORSO_STAB_ACTIVE : TORSO_STAB_IDLE;
+            const torsoAngleError = torso.angle;
+            Body.setAngularVelocity(torso,
+                torso.angularVelocity - torsoAngleError * stabStrength
+            );
         }
 
         // === Easter egg: all four keys = rolling cartwheel ===
