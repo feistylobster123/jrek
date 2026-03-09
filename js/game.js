@@ -199,8 +199,8 @@ if (!CanvasRenderingContext2D.prototype.roundRect) {
         // This makes the inverted pendulum (torso) fall harder, requiring precise control.
         engine = Engine.create({
             gravity: { x: 0, y: 1.0 },
-            constraintIterations: 6,   // Stiffer joints (default: 2)
-            positionIterations: 10,    // Better position solving (default: 6)
+            constraintIterations: 8,   // Stiffer joints (default: 2)
+            positionIterations: 20,    // High iteration count closes 3.7px feet-ground gap
         });
 
         // Create terrain

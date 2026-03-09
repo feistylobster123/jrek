@@ -103,22 +103,28 @@ const Runner = (function() {
     // references the world frame.
     const TORSO_TARGET = 0.04;      // Target lean angle (radians, ~2.3 deg). Forward lean
                                      // counteracts backward drift from constraint settling.
-                                     // With FOOT_GRAVITY_BOOST=0.008, friction handles most braking.
+                                     // At 0.08: causes runaway 65 deg lean during walking
+                                     // (stabBlend stays at 1.0 because muscles always active).
     const TORSO_STAB_IDLE = 0.30;   // P gain: velocity correction per radian of tilt
-    const TORSO_STAB_ACTIVE = 0.06; // Must be weak enough for motor reactions to create torso lean.
-                                     // Forward motion = lean + foot pushoff. Too strong = no lean = no forward force.
+    const TORSO_STAB_ACTIVE = 0.06; // Minimum stab during full muscle contraction.
+                                     // At 0.06: +37px forward but torso hits 57 deg (dangerous, 80=fall).
+                                     // At 0.18: torso stays <12 deg but no forward motion (-44px net).
+                                     // With smooth blend: fast ramp to 0.06 for lean, SLOW ramp back
+                                     // to 0.30 prevents snap-back recoil that killed forward momentum.
     const TORSO_DAMP_IDLE = 0.82;   // D: multiplicative damping (1.0 = none)
     const TORSO_DAMP_ACTIVE = 0.92; // Less damping during active control (more momentum)
 
     // === JOINT REST ANGLES (from split stance geometry) ===
     // These are the relative angles between parent and child at spawn.
     // When locked, joints are driven back toward these angles.
-    const LEFT_HIP_REST = HIP_SPLIT;                  //  0.35 (left thigh forward)
-    const RIGHT_HIP_REST = -HIP_SPLIT;                // -0.35 (right thigh back)
-    const LEFT_KNEE_REST = -KNEE_BEND;                // -0.12 (left knee bends back)
-    const RIGHT_KNEE_REST = KNEE_BEND;                //  0.12 (right knee bends forward)
-    const LEFT_ANKLE_REST = -(HIP_SPLIT - KNEE_BEND); // -0.23 (keeps left foot flat)
-    const RIGHT_ANKLE_REST = (HIP_SPLIT - KNEE_BEND); //  0.23 (keeps right foot flat)
+    // LEFT leg = drawn behind (far leg), physically angled backward.
+    // RIGHT leg = drawn in front (near leg), physically angled forward.
+    const LEFT_HIP_REST = -HIP_SPLIT;                 // -0.35 (left thigh backward)
+    const RIGHT_HIP_REST = HIP_SPLIT;                 //  0.35 (right thigh forward)
+    const LEFT_KNEE_REST = KNEE_BEND;                  //  0.12 (left knee slightly bent)
+    const RIGHT_KNEE_REST = -KNEE_BEND;                // -0.12 (right knee slightly bent)
+    const LEFT_ANKLE_REST = (HIP_SPLIT - KNEE_BEND);   //  0.23 (keeps left foot flat)
+    const RIGHT_ANKLE_REST = -(HIP_SPLIT - KNEE_BEND); // -0.23 (keeps right foot flat)
 
     // === JOINT ANGLE LIMITS ===
     const HIP_MIN_ANGLE = -1.0;
@@ -213,16 +219,16 @@ const Runner = (function() {
         const rightHipX = x + 3;
         const rightHipY = y + TORSO_H / 2;
 
-        // LEFT THIGH: angled forward by HIP_SPLIT
-        const ltAngle = HIP_SPLIT;
+        // LEFT THIGH: angled backward (far leg, drawn behind)
+        const ltAngle = -HIP_SPLIT;
         const ltCenterX = leftHipX + Math.sin(ltAngle) * UPPER_LEG_H / 2;
         const ltCenterY = leftHipY + Math.cos(ltAngle) * UPPER_LEG_H / 2;
         parts.leftThigh = Bodies.rectangle(ltCenterX, ltCenterY, UPPER_LEG_W, UPPER_LEG_H, {
             ...bodyOptions, density: LIMB_DENSITY, label: 'leftThigh', angle: ltAngle
         });
 
-        // RIGHT THIGH: angled backward by -HIP_SPLIT
-        const rtAngle = -HIP_SPLIT;
+        // RIGHT THIGH: angled forward (near leg, drawn in front)
+        const rtAngle = HIP_SPLIT;
         const rtCenterX = rightHipX + Math.sin(rtAngle) * UPPER_LEG_H / 2;
         const rtCenterY = rightHipY + Math.cos(rtAngle) * UPPER_LEG_H / 2;
         parts.rightThigh = Bodies.rectangle(rtCenterX, rtCenterY, UPPER_LEG_W, UPPER_LEG_H, {
@@ -235,16 +241,16 @@ const Runner = (function() {
         const rightKneeX = rightHipX + Math.sin(rtAngle) * UPPER_LEG_H;
         const rightKneeY = rightHipY + Math.cos(rtAngle) * UPPER_LEG_H;
 
-        // LEFT CALF: thigh angle minus knee bend
-        const lcAngle = ltAngle - KNEE_BEND;
+        // LEFT CALF: slightly more vertical than left thigh (knee slightly bent)
+        const lcAngle = ltAngle + KNEE_BEND;
         const lcCenterX = leftKneeX + Math.sin(lcAngle) * LOWER_LEG_H / 2;
         const lcCenterY = leftKneeY + Math.cos(lcAngle) * LOWER_LEG_H / 2;
         parts.leftCalf = Bodies.rectangle(lcCenterX, lcCenterY, LOWER_LEG_W, LOWER_LEG_H, {
             ...bodyOptions, density: LIMB_DENSITY, label: 'leftCalf', angle: lcAngle
         });
 
-        // RIGHT CALF: thigh angle PLUS knee bend (toward vertical, mirroring left)
-        const rcAngle = rtAngle + KNEE_BEND;
+        // RIGHT CALF: slightly more vertical than right thigh (knee slightly bent)
+        const rcAngle = rtAngle - KNEE_BEND;
         const rcCenterX = rightKneeX + Math.sin(rcAngle) * LOWER_LEG_H / 2;
         const rcCenterY = rightKneeY + Math.cos(rcAngle) * LOWER_LEG_H / 2;
         parts.rightCalf = Bodies.rectangle(rcCenterX, rcCenterY, LOWER_LEG_W, LOWER_LEG_H, {
@@ -345,6 +351,7 @@ const Runner = (function() {
                 leftKnee: 0,   // E key
                 rightKnee: 0,  // K key
             },
+            stabBlend: 0,  // Smooth blend factor for torso stab (0=idle, 1=active)
         };
 
         return runner;
@@ -442,9 +449,21 @@ const Runner = (function() {
         runner.rolling = allPressed;
 
         // --- Torso balance PD (absolute world-frame reference) ---
+        // Smooth blend between idle (strong=0.30) and active (weak=0.06) stab.
+        // Fast ramp toward active: lets torso lean quickly for forward thrust.
+        // Slow ramp back to idle: prevents snap-back recoil on key release
+        // that was killing all forward momentum from hip drives.
+        const STAB_BLEND_UP = 0.50;    // 2 frames to full active stab (near-instant lean)
+        const STAB_BLEND_DOWN = 0.020; // 50 frames (0.83s) back to full idle stab (prevents recoil)
+        if (anyActive) {
+            runner.stabBlend = Math.min(1, runner.stabBlend + STAB_BLEND_UP);
+        } else {
+            runner.stabBlend = Math.max(0, runner.stabBlend - STAB_BLEND_DOWN);
+        }
+
         if (!allPressed) {
-            const stabStrength = anyActive ? TORSO_STAB_ACTIVE : TORSO_STAB_IDLE;
-            const dampFactor = anyActive ? TORSO_DAMP_ACTIVE : TORSO_DAMP_IDLE;
+            const stabStrength = TORSO_STAB_IDLE + runner.stabBlend * (TORSO_STAB_ACTIVE - TORSO_STAB_IDLE);
+            const dampFactor = TORSO_DAMP_IDLE + runner.stabBlend * (TORSO_DAMP_ACTIVE - TORSO_DAMP_IDLE);
             const tiltError = torso.angle - TORSO_TARGET;
             Body.setAngularVelocity(torso,
                 torso.angularVelocity * dampFactor - tiltError * stabStrength
@@ -633,9 +652,9 @@ const Runner = (function() {
         }
 
         // Joint connector radii (sized to bridge gaps between parts)
-        const hipR = 6;    // covers gap between torso and thigh
-        const kneeR = 5.5; // covers gap between thigh and calf
-        const ankleR = 5;  // covers gap between calf and foot
+        const hipR = 7;    // covers gap between torso and thigh
+        const kneeR = 6.5; // covers gap between thigh and calf
+        const ankleR = 5.5; // covers gap between calf and foot
 
         function drawBodyPart(body, w, h, color) {
             ctx.save();
@@ -669,9 +688,10 @@ const Runner = (function() {
             ctx.restore();
         }
 
-        // === DRAW ORDER: back leg, back arm, torso, front arm, front leg, head ===
+        // === DRAW ORDER: far leg, torso, near leg, head ===
+        // Left = far leg (behind torso, backward). Right = near leg (in front, forward).
 
-        // -- BACK LEG (left, slightly darker) --
+        // -- FAR LEG (left, slightly darker, physically backward) --
         drawJointCircle(parts.torso, -3, TORSO_H / 2, hipR, skinShadow);
         drawBodyPart(parts.leftThigh, UPPER_LEG_W, UPPER_LEG_H, skinShadow);
         drawJointCircle(parts.leftThigh, 0, UPPER_LEG_H / 2, kneeR, skinShadow);
@@ -725,7 +745,7 @@ const Runner = (function() {
 
         ctx.restore();
 
-        // -- FRONT LEG (right, brighter) --
+        // -- NEAR LEG (right, brighter, physically forward) --
         drawJointCircle(parts.torso, 3, TORSO_H / 2, hipR, skinColor);
         drawBodyPart(parts.rightThigh, UPPER_LEG_W, UPPER_LEG_H, skinColor);
         drawJointCircle(parts.rightThigh, 0, UPPER_LEG_H / 2, kneeR, skinColor);
