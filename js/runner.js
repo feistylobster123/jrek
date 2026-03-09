@@ -78,13 +78,16 @@ const Runner = (function() {
     const JOINT_STIFFNESS = 1.0;
     const JOINT_DAMPING = 0.5;
 
-    // === TORSO STABILIZATION ===
-    // Simple PD to keep torso upright. Weak enough that movement is
-    // precarious, strong enough that idle stance holds for several seconds.
-    const TORSO_STAB_IDLE = 0.30;
-    const TORSO_STAB_ACTIVE = 0.04;
-    const TORSO_DAMP_IDLE = 0.85;
-    const TORSO_DAMP_ACTIVE = 0.95;
+    // === TORSO STABILIZATION (TORQUE-BASED PD) ===
+    // Uses torque instead of setting angular velocity directly.
+    // Velocity-based PD creates phantom forces that conflict with
+    // constraint springs, causing vertical bouncing. Torque works
+    // WITH the physics engine.
+    // Gains are scaled to torso inertia (~789 for 18×42 rect at density 0.006).
+    const TORSO_P_IDLE = 80;     // Restoring torque per radian of tilt
+    const TORSO_D_IDLE = 40;     // Damping torque per rad/s of angular vel
+    const TORSO_P_ACTIVE = 12;   // Much weaker when keys pressed (precarious)
+    const TORSO_D_ACTIVE = 8;    // Some damping to prevent wild spinning
 
     // === ROLLING CARTWHEEL EASTER EGG ===
     const ROLL_TORQUE = 0.6;
@@ -414,15 +417,14 @@ const Runner = (function() {
             Body.setAngularVelocity(part, av);
         }
 
-        // --- Torso stabilization (PD controller) ---
-        // Keeps the torso upright. Weaker when keys are pressed so
-        // movement is precarious and falling is possible.
+        // --- Torso stabilization (torque-based PD) ---
+        // Adds restoring torque proportional to tilt angle (P) and
+        // damping torque opposing angular velocity (D).
+        // Works WITH the physics engine rather than overriding velocity.
         if (!allPressed) {
-            const stabStrength = anyPressed ? TORSO_STAB_ACTIVE : TORSO_STAB_IDLE;
-            const dampFactor = anyPressed ? TORSO_DAMP_ACTIVE : TORSO_DAMP_IDLE;
-            Body.setAngularVelocity(torso,
-                torso.angularVelocity * dampFactor - torso.angle * stabStrength
-            );
+            const kp = anyPressed ? TORSO_P_ACTIVE : TORSO_P_IDLE;
+            const kd = anyPressed ? TORSO_D_ACTIVE : TORSO_D_IDLE;
+            torso.torque -= torso.angle * kp + torso.angularVelocity * kd;
         }
 
         // === Easter egg: all four keys = rolling cartwheel ===

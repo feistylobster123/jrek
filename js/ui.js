@@ -214,6 +214,12 @@ const UI = (function() {
             ctx.fillText(`(${feet.toFixed(0)} ft)`, canvasWidth - 15, 38);
         }
 
+        // Version tag (bottom-left, subtle)
+        ctx.textAlign = 'left';
+        ctx.fillStyle = 'rgba(255,255,255,0.2)';
+        ctx.font = '9px "Courier New", monospace';
+        ctx.fillText('v0.7', 6, canvasHeight - 6);
+
         // Control indicators at bottom
         renderControlIndicators(ctx, canvasWidth, canvasHeight, keys);
 

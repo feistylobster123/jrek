@@ -208,11 +208,10 @@ if (!CanvasRenderingContext2D.prototype.roundRect) {
 
         // Determine spawn position
         // Place runner so feet are just above the ground surface.
-        // From torso center to feet bottom = TORSO_H/2 + UPPER_LEG_H + LOWER_LEG_H + FOOT_H
-        // = 20 + 32 + 30 + 6 = 88px (from Runner body dimensions)
+        // STANCE_HEIGHT accounts for split stance geometry (trig, not straight legs).
         const spawnX = 200;
         const groundY = Terrain.getGroundY(spawnX);
-        const spawnY = groundY - 90; // torso center: feet will be ~2px above ground
+        const spawnY = groundY - Runner.STANCE_HEIGHT - 2; // torso center: feet ~2px above ground
 
         // Create runner
         runner = Runner.create(spawnX, spawnY);
