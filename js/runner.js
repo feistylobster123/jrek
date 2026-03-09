@@ -56,10 +56,17 @@ const Runner = (function() {
     // When J/R/E/K is pressed, the joint's target angle shifts from its rest position.
     // Uses the same PD controller as lockJoint but with a softer response.
     // This creates real constraint forces: if the foot is planted, the body moves.
-    const HIP_DRIVE_ANGLE = 0.35;    // How far hips swing from rest (radians, ~20deg)
-    const KNEE_DRIVE_ANGLE = 0.30;   // How far knees bend from rest
-    const MOTOR_POS_GAIN = 0.40;     // Softer than LOCK_POS_GAIN (0.80) for gradual drive
-    const MOTOR_DAMP = 0.90;         // Motor damping (less aggressive than lock's 0.98)
+    const HIP_DRIVE_ANGLE = 0.40;    // How far hips swing from rest (radians, ~23deg)
+    const KNEE_DRIVE_ANGLE = 0.35;   // How far knees bend from rest
+    const MOTOR_POS_GAIN = 0.80;     // Same strength as lock PD (motor = lock at shifted target)
+    const MOTOR_DAMP = 0.95;         // Strong damping to prevent oscillation
+
+    // === PASSIVE JOINT MODE ===
+    // When a joint's neighbors are actively driven, this joint needs to be SOFT
+    // so the limb can flex. Full-strength locks make the leg a rigid rod,
+    // preventing ground reaction forces. Passive mode = gentle guidance.
+    const PASSIVE_POS_GAIN = 0.10;   // Much softer than full lock (0.80)
+    const PASSIVE_DAMP = 0.60;       // Allow significant angular velocity
 
     // === JOINT LOCKING (VELOCITY-BASED PD PER JOINT) ===
     // Each joint uses a PD controller to hold its rest angle.
@@ -125,6 +132,21 @@ const Runner = (function() {
         // P: push toward rest angle
         const posCorrection = angleError * LOCK_POS_GAIN;
 
+        Body.setAngularVelocity(child,
+            child.angularVelocity + dampCorrection + posCorrection
+        );
+    }
+
+    // Soft version of lockJoint for joints that need to flex under motor load.
+    // Gently guides toward rest angle but allows significant movement.
+    function passiveJoint(parent, child, restAngle) {
+        let relAngle = child.angle - parent.angle;
+        while (relAngle > Math.PI) relAngle -= 2 * Math.PI;
+        while (relAngle < -Math.PI) relAngle += 2 * Math.PI;
+        const relAngVel = child.angularVelocity - parent.angularVelocity;
+        const angleError = restAngle - relAngle;
+        const dampCorrection = -relAngVel * PASSIVE_DAMP;
+        const posCorrection = angleError * PASSIVE_POS_GAIN;
         Body.setAngularVelocity(child,
             child.angularVelocity + dampCorrection + posCorrection
         );
@@ -279,48 +301,9 @@ const Runner = (function() {
             stiffness: 0.9, damping: 0.4, length: 0, label: 'rightAnkle',
         }));
 
-        // === STRUCTURAL BRACES ===
-        // Full-leg braces prevent positional collapse under gravity.
-
-        const leftBraceLen = Math.sqrt(
-            (parts.leftFoot.position.x - (x - 3)) ** 2 +
-            (parts.leftFoot.position.y - (y + TORSO_H / 2)) ** 2
-        );
-        constraints.push(Constraint.create({
-            bodyA: parts.torso, pointA: { x: -3, y: TORSO_H / 2 },
-            bodyB: parts.leftFoot, pointB: { x: 0, y: 0 },
-            stiffness: 0.25, damping: 0.2, length: leftBraceLen, label: 'leftFullLeg',
-        }));
-
-        const rightBraceLen = Math.sqrt(
-            (parts.rightFoot.position.x - (x + 3)) ** 2 +
-            (parts.rightFoot.position.y - (y + TORSO_H / 2)) ** 2
-        );
-        constraints.push(Constraint.create({
-            bodyA: parts.torso, pointA: { x: 3, y: TORSO_H / 2 },
-            bodyB: parts.rightFoot, pointB: { x: 0, y: 0 },
-            stiffness: 0.25, damping: 0.2, length: rightBraceLen, label: 'rightFullLeg',
-        }));
-
-        // Thigh cross-brace
-        const braceY = UPPER_LEG_H / 3;
-        const ltBraceWorld = {
-            x: ltCenterX + Math.sin(ltAngle) * braceY,
-            y: ltCenterY + Math.cos(ltAngle) * braceY,
-        };
-        const rtBraceWorld = {
-            x: rtCenterX + Math.sin(rtAngle) * braceY,
-            y: rtCenterY + Math.cos(rtAngle) * braceY,
-        };
-        const thighBraceLen = Math.sqrt(
-            (ltBraceWorld.x - rtBraceWorld.x) ** 2 +
-            (ltBraceWorld.y - rtBraceWorld.y) ** 2
-        );
-        constraints.push(Constraint.create({
-            bodyA: parts.leftThigh, pointA: { x: 0, y: UPPER_LEG_H / 3 },
-            bodyB: parts.rightThigh, pointB: { x: 0, y: UPPER_LEG_H / 3 },
-            stiffness: 0.15, damping: 0.2, length: thighBraceLen, label: 'thighBrace',
-        }));
+        // NOTE: No structural braces. The PD controllers (lockJoint) handle all
+        // structural rigidity. This allows motors to actually move the legs
+        // through the constraint chain and create ground reaction forces.
 
         const runner = {
             parts,
@@ -348,21 +331,29 @@ const Runner = (function() {
         Composite.remove(world, runner.constraints);
     }
 
-    // === JOINT MOTOR (ANGLE-TARGETING PD) ===
-    // Drives joint toward a TARGET ANGLE using the same PD approach as lockJoint
-    // but with softer gains. When a foot is planted, the constraint chain converts
-    // angular corrections into ground reaction forces = forward/backward motion.
+    // === JOINT MOTOR (TORQUE-BASED, ANGLE-TARGETING) ===
+    // Drives joint toward a TARGET ANGLE using torques (not velocity corrections).
+    // CRITICAL: Torques persist through the constraint solver, creating real forces
+    // that propagate through the joint chain to feet, producing ground reaction.
+    // Velocity-based corrections get eaten by the constraint solver.
+    // Reaction torque on parent = Newton's 3rd law = torso sway from motor effort.
+    const MOTOR_P = 0.3;      // Torque per radian of error (gentle)
+    const MOTOR_D = 0.08;     // Torque per rad/s of relative velocity (damping)
+    const MOTOR_MAX = 0.5;    // Max torque per frame (prevents explosive flips)
+
     function driveJoint(parent, child, targetAngle) {
         let relAngle = child.angle - parent.angle;
         while (relAngle > Math.PI) relAngle -= 2 * Math.PI;
         while (relAngle < -Math.PI) relAngle += 2 * Math.PI;
         const relAngVel = child.angularVelocity - parent.angularVelocity;
         const angleError = targetAngle - relAngle;
-        const dampCorrection = -relAngVel * MOTOR_DAMP;
-        const posCorrection = angleError * MOTOR_POS_GAIN;
-        Body.setAngularVelocity(child,
-            child.angularVelocity + dampCorrection + posCorrection
-        );
+
+        let torque = angleError * MOTOR_P - relAngVel * MOTOR_D;
+        if (torque > MOTOR_MAX) torque = MOTOR_MAX;
+        if (torque < -MOTOR_MAX) torque = -MOTOR_MAX;
+
+        child.torque += torque;
+        parent.torque -= torque; // Reaction torque = ground reaction force propagation
     }
 
     // === ANGLE LIMIT ENFORCEMENT ===
@@ -438,12 +429,13 @@ const Runner = (function() {
             });
 
             const phase = Math.sin(torso.angle * 2);
-            applyJointMotor(torso, leftThigh, phase > 0 ? HIP_MOTOR_SPEED : -HIP_MOTOR_SPEED);
-            applyJointMotor(torso, rightThigh, phase > 0 ? -HIP_MOTOR_SPEED : HIP_MOTOR_SPEED);
-            applyJointMotor(leftThigh, leftCalf, KNEE_MOTOR_SPEED * 0.4);
-            applyJointMotor(rightThigh, rightCalf, KNEE_MOTOR_SPEED * 0.4);
-            applyJointMotor(leftCalf, leftFoot, 0);
-            applyJointMotor(rightCalf, rightFoot, 0);
+            const hipDelta = phase > 0 ? 0.5 : -0.5;
+            driveJoint(torso, leftThigh, hipDelta);
+            driveJoint(torso, rightThigh, -hipDelta);
+            driveJoint(leftThigh, leftCalf, 0);
+            driveJoint(rightThigh, rightCalf, 0);
+            driveJoint(leftCalf, leftFoot, 0);
+            driveJoint(rightCalf, rightFoot, 0);
 
             enforceAngleLimit(torso, leftThigh, -2.2, 2.2);
             enforceAngleLimit(torso, rightThigh, -2.2, 2.2);
@@ -455,49 +447,71 @@ const Runner = (function() {
             return;
         }
 
-        // --- Determine motor targets ---
-        let leftHipTarget = 0;
-        let rightHipTarget = 0;
-        let leftKneeTarget = 0;
-        let rightKneeTarget = 0;
+        // --- Determine motor target angles ---
+        // Each key shifts the target angle from its rest position.
+        // J: left hip swings back, right hip swings forward (scissor)
+        // R: left hip swings forward, right hip swings back (opposite scissor)
+        // E: left knee straightens, right knee bends
+        // K: left knee bends, right knee straightens
+        let leftHipAngle = LEFT_HIP_REST;
+        let rightHipAngle = RIGHT_HIP_REST;
+        let leftKneeAngle = LEFT_KNEE_REST;
+        let rightKneeAngle = RIGHT_KNEE_REST;
 
         if (keys.j && !keys.r) {
-            leftHipTarget = -HIP_MOTOR_SPEED;
-            rightHipTarget = HIP_MOTOR_SPEED;
+            // J = SWAP legs: front leg swings back, back leg swings forward
+            // Targets the mirror of the rest position. Both targets are far
+            // from the constraint equilibrium (~0), producing real motion.
+            leftHipAngle = -HIP_SPLIT;                          // 0.35 -> -0.35 (left swings back)
+            rightHipAngle = HIP_SPLIT;                          // -0.35 -> +0.35 (right swings forward)
         } else if (keys.r && !keys.j) {
-            leftHipTarget = HIP_MOTOR_SPEED;
-            rightHipTarget = -HIP_MOTOR_SPEED;
+            // R = EXTEND split: both legs push further from center
+            leftHipAngle = LEFT_HIP_REST + HIP_DRIVE_ANGLE;   // +0.35 -> +0.70 (left more forward)
+            rightHipAngle = RIGHT_HIP_REST - HIP_DRIVE_ANGLE; // -0.35 -> -0.70 (right more back)
         }
 
         if (keys.e && !keys.k) {
-            leftKneeTarget = KNEE_MOTOR_SPEED;
-            rightKneeTarget = -KNEE_MOTOR_SPEED;
+            leftKneeAngle = LEFT_KNEE_REST + KNEE_DRIVE_ANGLE;  // Left knee extends
+            rightKneeAngle = RIGHT_KNEE_REST - KNEE_DRIVE_ANGLE; // Right knee flexes
         } else if (keys.k && !keys.e) {
-            leftKneeTarget = -KNEE_MOTOR_SPEED;
-            rightKneeTarget = KNEE_MOTOR_SPEED;
+            leftKneeAngle = LEFT_KNEE_REST - KNEE_DRIVE_ANGLE;  // Left knee flexes
+            rightKneeAngle = RIGHT_KNEE_REST + KNEE_DRIVE_ANGLE; // Right knee extends
         }
 
         // --- HIPS ---
         if (anyHipKey) {
-            applyJointMotor(torso, leftThigh, leftHipTarget);
-            applyJointMotor(torso, rightThigh, rightHipTarget);
+            driveJoint(torso, leftThigh, leftHipAngle);
+            driveJoint(torso, rightThigh, rightHipAngle);
         } else {
             lockJoint(torso, leftThigh, LEFT_HIP_REST);
             lockJoint(torso, rightThigh, RIGHT_HIP_REST);
         }
 
         // --- KNEES ---
+        // When hips are active, knees go PASSIVE (soft) so legs can flex.
+        // When knees are active, they're driven to target angles.
+        // When nothing is active, knees are fully locked.
         if (anyKneeKey) {
-            applyJointMotor(leftThigh, leftCalf, leftKneeTarget);
-            applyJointMotor(rightThigh, rightCalf, rightKneeTarget);
+            driveJoint(leftThigh, leftCalf, leftKneeAngle);
+            driveJoint(rightThigh, rightCalf, rightKneeAngle);
+        } else if (anyHipKey) {
+            passiveJoint(leftThigh, leftCalf, LEFT_KNEE_REST);
+            passiveJoint(rightThigh, rightCalf, RIGHT_KNEE_REST);
         } else {
             lockJoint(leftThigh, leftCalf, LEFT_KNEE_REST);
             lockJoint(rightThigh, rightCalf, RIGHT_KNEE_REST);
         }
 
-        // --- ANKLES: always locked ---
-        lockJoint(leftCalf, leftFoot, LEFT_ANKLE_REST);
-        lockJoint(rightCalf, rightFoot, RIGHT_ANKLE_REST);
+        // --- ANKLES ---
+        // Passive when any key is active (allows foot to pivot on ground).
+        // Fully locked when idle.
+        if (anyPressed) {
+            passiveJoint(leftCalf, leftFoot, LEFT_ANKLE_REST);
+            passiveJoint(rightCalf, rightFoot, RIGHT_ANKLE_REST);
+        } else {
+            lockJoint(leftCalf, leftFoot, LEFT_ANKLE_REST);
+            lockJoint(rightCalf, rightFoot, RIGHT_ANKLE_REST);
+        }
 
         // --- Enforce angle limits ---
         enforceAngleLimit(torso, leftThigh, HIP_MIN_ANGLE, HIP_MAX_ANGLE);
@@ -560,12 +574,38 @@ const Runner = (function() {
         const shoeColor = '#4a6741';
         const shoeSoleColor = '#1a1a1a';
         const capRedColor = '#cc2222';
-        const capWhiteColor = '#e8e0d4';
+        const capWhiteColor = '#f0e8dc';
         const capBrimColor = '#2a2a2a';
         const hairColor = '#3b2507';
         const wristbandColor = '#e6cc00';
         const watchColor = '#222222';
         const bottleColor = '#e8e8e8';
+
+        // --- Helper: get world position of a body-local offset ---
+        function worldPos(body, lx, ly) {
+            const cos = Math.cos(body.angle);
+            const sin = Math.sin(body.angle);
+            return {
+                x: body.position.x + (lx * cos - ly * sin),
+                y: body.position.y + (lx * sin + ly * cos),
+            };
+        }
+
+        // --- Helper: draw a joint connector circle ---
+        // Like QWOP's round joint connectors -- bridges the visual gap
+        // between body parts so the character looks connected.
+        function drawJointCircle(body, offsetX, offsetY, radius, color) {
+            const p = worldPos(body, offsetX, offsetY);
+            ctx.fillStyle = color;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, radius, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
+        // Joint connector radii (sized to bridge gaps between parts)
+        const hipR = 6;    // covers gap between torso and thigh
+        const kneeR = 5.5; // covers gap between thigh and calf
+        const ankleR = 5;  // covers gap between calf and foot
 
         function drawBodyPart(body, w, h, color) {
             ctx.save();
@@ -602,8 +642,11 @@ const Runner = (function() {
         // === DRAW ORDER: back leg, back arm, torso, front arm, front leg, head ===
 
         // -- BACK LEG (left, slightly darker) --
+        drawJointCircle(parts.torso, -3, TORSO_H / 2, hipR, skinShadow);
         drawBodyPart(parts.leftThigh, UPPER_LEG_W, UPPER_LEG_H, skinShadow);
+        drawJointCircle(parts.leftThigh, 0, UPPER_LEG_H / 2, kneeR, skinShadow);
         drawBodyPart(parts.leftCalf, LOWER_LEG_W, LOWER_LEG_H, skinShadow);
+        drawJointCircle(parts.leftCalf, 0, LOWER_LEG_H / 2, ankleR, skinShadow);
         drawShoe(parts.leftFoot, true);
 
         // -- TORSO --
@@ -653,8 +696,11 @@ const Runner = (function() {
         ctx.restore();
 
         // -- FRONT LEG (right, brighter) --
+        drawJointCircle(parts.torso, 3, TORSO_H / 2, hipR, skinColor);
         drawBodyPart(parts.rightThigh, UPPER_LEG_W, UPPER_LEG_H, skinColor);
+        drawJointCircle(parts.rightThigh, 0, UPPER_LEG_H / 2, kneeR, skinColor);
         drawBodyPart(parts.rightCalf, LOWER_LEG_W, LOWER_LEG_H, skinColor);
+        drawJointCircle(parts.rightCalf, 0, LOWER_LEG_H / 2, ankleR, skinColor);
         drawShoe(parts.rightFoot, false);
 
         // -- HANDHELD BOTTLE --
@@ -694,33 +740,41 @@ const Runner = (function() {
         ctx.arc(0, 0, HEAD_RADIUS, 0, Math.PI * 2);
         ctx.fill();
 
+        // --- Running cap (redesigned) ---
+        // Runner faces RIGHT. Red crown covers back/top, white front panel faces right.
+        const R = HEAD_RADIUS + 1;
+        const capY = -2;
+
+        // Red crown (back and top)
         ctx.fillStyle = capRedColor;
         ctx.beginPath();
-        ctx.arc(0, -2, HEAD_RADIUS + 1, Math.PI * 1.15, Math.PI * 1.85);
-        ctx.quadraticCurveTo(0, -HEAD_RADIUS - 6, 0, -HEAD_RADIUS - 4);
+        ctx.arc(0, capY, R, -Math.PI * 0.85, -Math.PI * 0.1);
+        ctx.lineTo(R * 0.25, capY - R - 2);
         ctx.closePath();
         ctx.fill();
 
+        // White front panel (facing right)
         ctx.fillStyle = capWhiteColor;
         ctx.beginPath();
-        ctx.arc(0, -2, HEAD_RADIUS + 1, Math.PI * 0.15, Math.PI * 0.35);
-        ctx.lineTo(0, -HEAD_RADIUS - 4);
-        ctx.arc(0, -2, HEAD_RADIUS + 1, Math.PI * 1.85, Math.PI * 2.0);
+        ctx.arc(0, capY, R, -Math.PI * 0.1, Math.PI * 0.08);
+        ctx.lineTo(R * 0.25, capY - R - 2);
         ctx.closePath();
         ctx.fill();
 
+        // CLIF logo on front panel (red text on white)
+        ctx.fillStyle = '#cc2222';
+        ctx.font = 'bold 4px Arial';
+        ctx.textAlign = 'center';
+        ctx.fillText('CLIF', 3, capY - HEAD_RADIUS + 5);
+
+        // Brim (extends forward/right)
         ctx.fillStyle = capBrimColor;
         ctx.beginPath();
-        ctx.moveTo(HEAD_RADIUS * 0.5, -HEAD_RADIUS * 0.5);
-        ctx.quadraticCurveTo(HEAD_RADIUS + 8, -HEAD_RADIUS * 0.6, HEAD_RADIUS + 11, -HEAD_RADIUS * 0.25);
-        ctx.quadraticCurveTo(HEAD_RADIUS + 8, HEAD_RADIUS * 0.0, HEAD_RADIUS * 0.4, -HEAD_RADIUS * 0.15);
+        ctx.moveTo(HEAD_RADIUS * 0.6, -HEAD_RADIUS * 0.35);
+        ctx.quadraticCurveTo(HEAD_RADIUS + 9, -HEAD_RADIUS * 0.45, HEAD_RADIUS + 12, -HEAD_RADIUS * 0.1);
+        ctx.quadraticCurveTo(HEAD_RADIUS + 9, HEAD_RADIUS * 0.1, HEAD_RADIUS * 0.5, -HEAD_RADIUS * 0.05);
         ctx.closePath();
         ctx.fill();
-
-        ctx.fillStyle = '#ffffff';
-        ctx.font = 'bold 5px Arial';
-        ctx.textAlign = 'center';
-        ctx.fillText('CLIF', 0, -HEAD_RADIUS + 2);
 
         ctx.fillStyle = '#1a1208';
         ctx.beginPath();
@@ -762,27 +816,7 @@ const Runner = (function() {
 
         ctx.restore();
 
-        // Joint dots (very subtle)
-        ctx.fillStyle = 'rgba(0,0,0,0.15)';
-        const jointSize = 2;
-        drawJointDot(ctx, parts.torso, { x: -3, y: TORSO_H / 2 }, jointSize);
-        drawJointDot(ctx, parts.torso, { x: 3, y: TORSO_H / 2 }, jointSize);
-        drawJointDot(ctx, parts.leftThigh, { x: 0, y: UPPER_LEG_H / 2 }, jointSize);
-        drawJointDot(ctx, parts.rightThigh, { x: 0, y: UPPER_LEG_H / 2 }, jointSize);
-        drawJointDot(ctx, parts.leftCalf, { x: 0, y: LOWER_LEG_H / 2 }, jointSize);
-        drawJointDot(ctx, parts.rightCalf, { x: 0, y: LOWER_LEG_H / 2 }, jointSize);
-
         ctx.restore();
-    }
-
-    function drawJointDot(ctx, body, offset, radius) {
-        const cos = Math.cos(body.angle);
-        const sin = Math.sin(body.angle);
-        const wx = body.position.x + (offset.x * cos - offset.y * sin);
-        const wy = body.position.y + (offset.x * sin + offset.y * cos);
-        ctx.beginPath();
-        ctx.arc(wx, wy, radius, 0, Math.PI * 2);
-        ctx.fill();
     }
 
     return {
