@@ -255,8 +255,8 @@ const Runner = (function() {
             pointA: { x: -3, y: TORSO_H / 2 },
             bodyB: parts.leftFoot,
             pointB: { x: 0, y: 0 },
-            stiffness: 0.06,
-            damping: 0.15,
+            stiffness: 0.12,
+            damping: 0.2,
             length: UPPER_LEG_H + LOWER_LEG_H + FOOT_H / 2,
             label: 'leftFullLeg',
         }));
@@ -266,8 +266,8 @@ const Runner = (function() {
             pointA: { x: 3, y: TORSO_H / 2 },
             bodyB: parts.rightFoot,
             pointB: { x: 0, y: 0 },
-            stiffness: 0.06,
-            damping: 0.15,
+            stiffness: 0.12,
+            damping: 0.2,
             length: UPPER_LEG_H + LOWER_LEG_H + FOOT_H / 2,
             label: 'rightFullLeg',
         }));
@@ -370,8 +370,9 @@ const Runner = (function() {
     // Matter.js can't do rigid pin joints like Box2D, so we need mild
     // stabilization to prevent instant collapse. This weakens when keys
     // are pressed, making the runner vulnerable during movement.
-    const TORSO_STAB_IDLE = 0.12;    // Uprighting strength when no keys pressed
-    const TORSO_STAB_ACTIVE = 0.03;  // Much weaker when keys pressed
+    const TORSO_STAB_IDLE = 0.6;     // Strong uprighting when idle
+    const TORSO_STAB_ACTIVE = 0.08;  // Much weaker when keys pressed (4x wobbier = can fall)
+    const MAX_ANGULAR_VEL = 0.25;    // Clamp angular velocity to prevent spinning
 
     // === ROLLING CARTWHEEL EASTER EGG ===
     const ROLL_TORQUE = 0.6;
@@ -384,11 +385,16 @@ const Runner = (function() {
         const anyPressed = keys.j || keys.r || keys.e || keys.k;
         runner.rolling = allPressed;
 
-        // --- Angular damping on all bodies ---
+        // --- Angular damping + velocity clamping on all bodies ---
         for (const key of Object.keys(runner.parts)) {
             const part = runner.parts[key];
             const damping = (allPressed && part === torso) ? 0.99 : ANGULAR_DAMPING;
-            Body.setAngularVelocity(part, part.angularVelocity * damping);
+            let av = part.angularVelocity * damping;
+            // Clamp angular velocity to prevent wild spinning/launching
+            if (!allPressed) {
+                av = Math.max(-MAX_ANGULAR_VEL, Math.min(MAX_ANGULAR_VEL, av));
+            }
+            Body.setAngularVelocity(part, av);
         }
 
         // --- Torso stabilization (Matter.js compromise) ---
