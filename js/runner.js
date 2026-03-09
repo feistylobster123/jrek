@@ -725,6 +725,10 @@ const Runner = (function() {
             ctx.arc(0, 5, 3.5, 0, Math.PI * 2);
             ctx.fillStyle = '#1a1208';
             ctx.fill();
+        } else if (runner.rolling) {
+            // Manic grin during barrel roll
+            ctx.moveTo(-5, 4);
+            ctx.quadraticCurveTo(0, 9, 5, 4);
         } else {
             // Determined grimace
             ctx.moveTo(-3, 5);
