@@ -239,8 +239,10 @@ if (!CanvasRenderingContext2D.prototype.roundRect) {
         keys.e = false;
         keys.k = false;
 
-        // Debug hook: expose internals for automated testing
-        window._jrekDebug = { runner, engine, terrain, keys, gameState: () => gameState, Runner, Terrain };
+        // Debug hook: expose internals for automated testing.
+        // Set paused=true to stop the game loop from stepping physics
+        // (allows external test harnesses to step manually).
+        window._jrekDebug = { runner, engine, terrain, keys, gameState: () => gameState, Runner, Terrain, paused: false };
     }
 
     function resetGame() {
@@ -287,6 +289,8 @@ if (!CanvasRenderingContext2D.prototype.roundRect) {
     // --- Physics Update ---
     function update() {
         if (gameState !== 'playing' && gameState !== 'fallen') return;
+        // Allow test harnesses to pause the game loop
+        if (window._jrekDebug && window._jrekDebug.paused) return;
 
         // Update elapsed time
         if (gameState === 'playing') {

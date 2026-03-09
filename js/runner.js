@@ -51,10 +51,10 @@ const Runner = (function() {
     // === JOINT MOTOR PARAMETERS ===
     const HIP_MOTOR_SPEED = 0.12;
     const KNEE_MOTOR_SPEED = 0.12;
-    const HIP_MAX_TORQUE = 2.5;
-    const KNEE_MAX_TORQUE = 2.0;
-    const BRAKE_TORQUE = 3.0;
-    const MOTOR_GAIN = 8.0;
+    const HIP_MAX_TORQUE = 1.8;   // Reduced from 2.5 - less reaction torque on torso
+    const KNEE_MAX_TORQUE = 1.4;   // Reduced from 2.0
+    const BRAKE_TORQUE = 2.0;
+    const MOTOR_GAIN = 6.0;        // Reduced from 8.0 - smoother motor ramp-up
 
     // === JOINT LOCKING ===
     // Kills relative angular velocity between two connected bodies.
@@ -78,16 +78,14 @@ const Runner = (function() {
     const JOINT_STIFFNESS = 1.0;
     const JOINT_DAMPING = 0.5;
 
-    // === TORSO STABILIZATION (TORQUE-BASED PD) ===
-    // Uses torque instead of setting angular velocity directly.
-    // Velocity-based PD creates phantom forces that conflict with
-    // constraint springs, causing vertical bouncing. Torque works
-    // WITH the physics engine.
-    // Gains are scaled to torso inertia (~789 for 18×42 rect at density 0.006).
-    const TORSO_P_IDLE = 80;     // Restoring torque per radian of tilt
-    const TORSO_D_IDLE = 40;     // Damping torque per rad/s of angular vel
-    const TORSO_P_ACTIVE = 12;   // Much weaker when keys pressed (precarious)
-    const TORSO_D_ACTIVE = 8;    // Some damping to prevent wild spinning
+    // === TORSO STABILIZATION (VELOCITY-BASED PD WITH SMOOTH BLENDING) ===
+    // Directly sets angular velocity each frame for responsive stability.
+    // Gains smoothly blend between idle/active to prevent glitchy snapping.
+    const TORSO_STAB_IDLE = 0.30;   // P gain: velocity correction per radian of tilt
+    const TORSO_STAB_ACTIVE = 0.05; // Weaker when keys pressed (precarious balance)
+    const TORSO_DAMP_IDLE = 0.85;   // D: multiplicative damping (1.0 = none)
+    const TORSO_DAMP_ACTIVE = 0.94; // Less damping during active control
+    const STAB_BLEND_RATE = 0.06;   // Smooth transition rate (0-1 per frame, ~17 frames to 63%)
 
     // === ROLLING CARTWHEEL EASTER EGG ===
     const ROLL_TORQUE = 0.6;
@@ -173,8 +171,8 @@ const Runner = (function() {
             ...bodyOptions, density: LIMB_DENSITY, label: 'leftCalf', angle: lcAngle
         });
 
-        // RIGHT CALF: thigh angle minus knee bend
-        const rcAngle = rtAngle - KNEE_BEND;
+        // RIGHT CALF: thigh angle PLUS knee bend (toward vertical, mirroring left)
+        const rcAngle = rtAngle + KNEE_BEND;
         const rcCenterX = rightKneeX + Math.sin(rcAngle) * LOWER_LEG_H / 2;
         const rcCenterY = rightKneeY + Math.cos(rcAngle) * LOWER_LEG_H / 2;
         parts.rightCalf = Bodies.rectangle(rcCenterX, rcCenterY, LOWER_LEG_W, LOWER_LEG_H, {
@@ -297,32 +295,56 @@ const Runner = (function() {
 
         // === STRUCTURAL BRACES ===
         // Matter.js constraints are springs, not rigid joints.
-        // These prevent positional collapse under gravity.
+        // Full-leg braces prevent positional collapse under gravity.
+        // Lengths computed from actual split stance geometry (not straight-leg).
 
-        // Full-leg braces: torso-hip to foot
+        // Left full-leg brace: hip attach to foot center
+        const leftBraceLen = Math.sqrt(
+            (parts.leftFoot.position.x - (x - 3)) ** 2 +
+            (parts.leftFoot.position.y - (y + TORSO_H / 2)) ** 2
+        );
         constraints.push(Constraint.create({
             bodyA: parts.torso,
             pointA: { x: -3, y: TORSO_H / 2 },
             bodyB: parts.leftFoot,
             pointB: { x: 0, y: 0 },
-            stiffness: 0.2,
+            stiffness: 0.15,
             damping: 0.3,
-            length: UPPER_LEG_H + LOWER_LEG_H + FOOT_H / 2,
+            length: leftBraceLen,
             label: 'leftFullLeg',
         }));
 
+        // Right full-leg brace
+        const rightBraceLen = Math.sqrt(
+            (parts.rightFoot.position.x - (x + 3)) ** 2 +
+            (parts.rightFoot.position.y - (y + TORSO_H / 2)) ** 2
+        );
         constraints.push(Constraint.create({
             bodyA: parts.torso,
             pointA: { x: 3, y: TORSO_H / 2 },
             bodyB: parts.rightFoot,
             pointB: { x: 0, y: 0 },
-            stiffness: 0.2,
+            stiffness: 0.15,
             damping: 0.3,
-            length: UPPER_LEG_H + LOWER_LEG_H + FOOT_H / 2,
+            length: rightBraceLen,
             label: 'rightFullLeg',
         }));
 
-        // Thigh cross-brace: prevents doing the splits
+        // Thigh cross-brace: prevents doing the splits.
+        // Length computed from actual split stance geometry.
+        const braceY = UPPER_LEG_H / 3;
+        const ltBraceWorld = {
+            x: ltCenterX + Math.sin(ltAngle) * braceY,
+            y: ltCenterY + Math.cos(ltAngle) * braceY,
+        };
+        const rtBraceWorld = {
+            x: rtCenterX + Math.sin(rtAngle) * braceY,
+            y: rtCenterY + Math.cos(rtAngle) * braceY,
+        };
+        const thighBraceLen = Math.sqrt(
+            (ltBraceWorld.x - rtBraceWorld.x) ** 2 +
+            (ltBraceWorld.y - rtBraceWorld.y) ** 2
+        );
         constraints.push(Constraint.create({
             bodyA: parts.leftThigh,
             pointA: { x: 0, y: UPPER_LEG_H / 3 },
@@ -330,7 +352,7 @@ const Runner = (function() {
             pointB: { x: 0, y: UPPER_LEG_H / 3 },
             stiffness: 0.12,
             damping: 0.3,
-            length: 10,
+            length: thighBraceLen,
             label: 'thighBrace',
         }));
 
@@ -343,6 +365,7 @@ const Runner = (function() {
             distance: 0,
             maxDistance: 0,
             rolling: false,
+            stabBlend: 0, // 0 = full idle stabilization, 1 = full active
         };
 
         return runner;
@@ -406,25 +429,34 @@ const Runner = (function() {
         const anyKneeKey = keys.e || keys.k;
         runner.rolling = allPressed;
 
-        // --- Angular damping + velocity clamping on all bodies ---
+        // --- Angular damping + velocity clamping ---
+        // Limbs get damping + clamping. Torso only gets mild damping during
+        // rolling (PD handles torso stability otherwise).
         for (const key of Object.keys(runner.parts)) {
             const part = runner.parts[key];
+            if (part === torso && !allPressed) continue; // PD handles torso
             const damping = (allPressed && part === torso) ? 0.99 : ANGULAR_DAMPING;
             let av = part.angularVelocity * damping;
-            if (!allPressed) {
+            if (!allPressed && part !== torso) {
                 av = Math.max(-MAX_ANGULAR_VEL, Math.min(MAX_ANGULAR_VEL, av));
             }
             Body.setAngularVelocity(part, av);
         }
 
-        // --- Torso stabilization (torque-based PD) ---
-        // Adds restoring torque proportional to tilt angle (P) and
-        // damping torque opposing angular velocity (D).
-        // Works WITH the physics engine rather than overriding velocity.
+        // --- Torso stabilization (velocity PD with smooth blending) ---
+        // Smoothly transitions between idle (strong) and active (weak) gains
+        // to avoid the glitchy snap that caused "random/crazy" feel.
+        // The blend rate means pressing/releasing a key gradually changes
+        // stability over ~17 frames instead of instantly.
         if (!allPressed) {
-            const kp = anyPressed ? TORSO_P_ACTIVE : TORSO_P_IDLE;
-            const kd = anyPressed ? TORSO_D_ACTIVE : TORSO_D_IDLE;
-            torso.torque -= torso.angle * kp + torso.angularVelocity * kd;
+            const targetBlend = anyPressed ? 1 : 0;
+            runner.stabBlend += (targetBlend - runner.stabBlend) * STAB_BLEND_RATE;
+
+            const stab = TORSO_STAB_IDLE + (TORSO_STAB_ACTIVE - TORSO_STAB_IDLE) * runner.stabBlend;
+            const damp = TORSO_DAMP_IDLE + (TORSO_DAMP_ACTIVE - TORSO_DAMP_IDLE) * runner.stabBlend;
+            Body.setAngularVelocity(torso,
+                torso.angularVelocity * damp - torso.angle * stab
+            );
         }
 
         // === Easter egg: all four keys = rolling cartwheel ===
