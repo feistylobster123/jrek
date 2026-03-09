@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>JREK - Western States 100</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <canvas id="gameCanvas"></canvas>
+
+    <div id="titleScreen">
+        <div class="title-content">
+            <h1 class="game-title">JREK</h1>
+            <h2 class="game-subtitle">Western States 100</h2>
+            <div class="controls-display">
+                <div class="control-row">
+                    <span class="key">J</span> / <span class="key">R</span> = Thighs
+                    <span class="separator">|</span>
+                    <span class="key">E</span> / <span class="key">K</span> = Calves
+                </div>
+            </div>
+            <p class="tagline">7x champion. 100 miles. 4 keys. Good luck.</p>
+            <p class="start-prompt">Press SPACE to start</p>
+            <p class="start-location">Squaw Valley, elevation 6,200 ft. 100 miles to Auburn.</p>
+        </div>
+    </div>
+
+    <div id="fallMessage" class="fall-message hidden"></div>
+    <div id="finishScreen" class="hidden">
+        <h1>YOU DID THE BARREL ROLL</h1>
+        <canvas id="confettiCanvas"></canvas>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.20.0/matter.min.js"></script>
+    <script src="js/runner.js"></script>
+    <script src="js/terrain.js"></script>
+    <script src="js/ui.js"></script>
+    <script src="js/game.js"></script>
+</body>
+</html>

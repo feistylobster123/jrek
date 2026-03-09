@@ -1,0 +1,201 @@
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    background: #1a1a2e;
+    overflow: hidden;
+    font-family: 'Courier New', Courier, monospace;
+    width: 100vw;
+    height: 100vh;
+}
+
+#gameCanvas {
+    display: block;
+    width: 100vw;
+    height: 100vh;
+    position: absolute;
+    top: 0;
+    left: 0;
+}
+
+/* Title Screen */
+#titleScreen {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10;
+    background: linear-gradient(180deg,
+        #1a3a5c 0%,
+        #2d5a3d 40%,
+        #4a3728 70%,
+        #2a1f14 100%
+    );
+}
+
+.title-content {
+    text-align: center;
+    color: #f0e6d3;
+}
+
+.game-title {
+    font-size: 12vw;
+    font-weight: 900;
+    letter-spacing: 0.15em;
+    color: #e8d5b7;
+    text-shadow:
+        4px 4px 0 #2a1f14,
+        8px 8px 0 rgba(42, 31, 20, 0.5);
+    margin-bottom: 0.1em;
+    font-family: 'Impact', 'Arial Black', sans-serif;
+}
+
+.game-subtitle {
+    font-size: 2.5vw;
+    font-weight: 400;
+    color: #a89070;
+    letter-spacing: 0.3em;
+    text-transform: uppercase;
+    margin-bottom: 2em;
+}
+
+.controls-display {
+    background: rgba(0, 0, 0, 0.3);
+    padding: 1em 2em;
+    border-radius: 8px;
+    display: inline-block;
+    margin-bottom: 1.5em;
+}
+
+.control-row {
+    font-size: 1.3vw;
+    color: #c0a888;
+    letter-spacing: 0.05em;
+}
+
+.key {
+    display: inline-block;
+    background: #e8d5b7;
+    color: #2a1f14;
+    padding: 0.2em 0.6em;
+    border-radius: 4px;
+    font-weight: 700;
+    font-size: 1.1em;
+    border-bottom: 3px solid #a89070;
+    min-width: 1.5em;
+    text-align: center;
+}
+
+.separator {
+    margin: 0 1em;
+    color: #665544;
+}
+
+.tagline {
+    font-size: 1.2vw;
+    color: #8a7a6a;
+    font-style: italic;
+    margin-bottom: 2em;
+}
+
+.start-prompt {
+    font-size: 1.8vw;
+    color: #e8d5b7;
+    animation: pulse 1.5s ease-in-out infinite;
+    margin-bottom: 1.5em;
+}
+
+.start-location {
+    font-size: 1vw;
+    color: #665544;
+    letter-spacing: 0.1em;
+}
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+}
+
+/* Fall Message */
+.fall-message {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    font-size: 3vw;
+    font-weight: 900;
+    color: #e8d5b7;
+    text-shadow: 3px 3px 0 #2a1f14;
+    z-index: 20;
+    pointer-events: none;
+    text-align: center;
+    font-family: 'Impact', 'Arial Black', sans-serif;
+    opacity: 1;
+    transition: opacity 0.5s ease;
+    max-width: 80vw;
+}
+
+.fall-message.hidden {
+    display: none;
+}
+
+.fall-message.fade-out {
+    opacity: 0;
+}
+
+/* Finish Screen */
+#finishScreen {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    z-index: 30;
+    background: rgba(0, 0, 0, 0.7);
+}
+
+#finishScreen h1 {
+    font-size: 6vw;
+    color: #ffd700;
+    text-shadow: 3px 3px 0 #b8860b;
+    font-family: 'Impact', 'Arial Black', sans-serif;
+    letter-spacing: 0.1em;
+}
+
+#finishScreen.hidden {
+    display: none;
+}
+
+#confettiCanvas {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+}
+
+/* HUD - rendered on canvas, but restart prompt overlay */
+.restart-prompt {
+    position: absolute;
+    bottom: 15%;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 1.5vw;
+    color: #e8d5b7;
+    animation: pulse 1.5s ease-in-out infinite;
+    z-index: 21;
+    pointer-events: none;
+    font-family: 'Courier New', Courier, monospace;
+}
