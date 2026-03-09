@@ -102,7 +102,7 @@ if (!CanvasRenderingContext2D.prototype.roundRect) {
 
         // Create physics engine
         engine = Engine.create({
-            gravity: { x: 0, y: 1.2 },
+            gravity: { x: 0, y: 0.9 },
         });
 
         // Create terrain

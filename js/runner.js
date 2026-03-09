@@ -19,20 +19,26 @@ const Runner = (function() {
     const FOOT_H = 6 * SCALE;
 
     // Physics tuning
-    const BODY_FRICTION = 0.3;
-    const BODY_RESTITUTION = 0.1;
-    const LIMB_DENSITY = 0.002;
-    const TORSO_DENSITY = 0.004;
-    const HEAD_DENSITY = 0.003;
-    const FOOT_DENSITY = 0.003;
+    const BODY_FRICTION = 0.6;
+    const BODY_RESTITUTION = 0.05;
+    const LIMB_DENSITY = 0.001;
+    const TORSO_DENSITY = 0.005;
+    const HEAD_DENSITY = 0.002;
+    const FOOT_DENSITY = 0.004;
 
     // Joint stiffness
-    const JOINT_STIFFNESS = 0.6;
-    const JOINT_DAMPING = 0.3;
+    const JOINT_STIFFNESS = 1.0;
+    const JOINT_DAMPING = 0.5;
 
     // Force magnitudes for controls
-    const HIP_TORQUE = 0.07;
-    const KNEE_TORQUE = 0.05;
+    const HIP_TORQUE = 0.08;
+    const KNEE_TORQUE = 0.06;
+
+    // Standing stabilization - angular springs that keep the runner upright
+    const TORSO_UPRIGHT_FORCE = 0.025;
+    const HIP_SPRING_FORCE = 0.015;
+    const KNEE_SPRING_FORCE = 0.012;
+    const ANGULAR_DAMPING = 0.15;
 
     // Collision categories
     const RUNNER_CATEGORY = 0x0002;
@@ -242,10 +248,36 @@ const Runner = (function() {
             pointA: { x: 0, y: UPPER_LEG_H / 4 },
             bodyB: parts.rightThigh,
             pointB: { x: 0, y: UPPER_LEG_H / 4 },
-            stiffness: 0.03,
-            damping: 0.1,
-            length: 20,
+            stiffness: 0.1,
+            damping: 0.2,
+            length: 12,
             label: 'thighBrace',
+        }));
+
+        // Additional structural constraints for standing stability
+
+        // Torso to left knee region (prevents legs folding under)
+        constraints.push(Constraint.create({
+            bodyA: parts.torso,
+            pointA: { x: -4, y: TORSO_H / 2 },
+            bodyB: parts.leftCalf,
+            pointB: { x: 0, y: -LOWER_LEG_H / 4 },
+            stiffness: 0.05,
+            damping: 0.2,
+            length: UPPER_LEG_H + LOWER_LEG_H / 4,
+            label: 'leftLegBrace',
+        }));
+
+        // Torso to right knee region
+        constraints.push(Constraint.create({
+            bodyA: parts.torso,
+            pointA: { x: 4, y: TORSO_H / 2 },
+            bodyB: parts.rightCalf,
+            pointB: { x: 0, y: -LOWER_LEG_H / 4 },
+            stiffness: 0.05,
+            damping: 0.2,
+            length: UPPER_LEG_H + LOWER_LEG_H / 4,
+            label: 'rightLegBrace',
         }));
 
         const runner = {
@@ -273,51 +305,99 @@ const Runner = (function() {
         Composite.remove(world, runner.constraints);
     }
 
+    // Stabilize the runner - angular springs keep body upright when no keys pressed.
+    // This is the key to making the runner STAND like in QWOP.
+    // Without this, Matter.js ragdolls just collapse.
+    function stabilize(runner) {
+        const { torso, leftThigh, rightThigh, leftCalf, rightCalf, leftFoot, rightFoot } = runner.parts;
+
+        // Torso wants to stay vertical (angle = 0)
+        const torsoCorrection = -torso.angle * TORSO_UPRIGHT_FORCE;
+        Body.setAngularVelocity(torso,
+            torso.angularVelocity * (1 - ANGULAR_DAMPING) + torsoCorrection
+        );
+
+        // Thighs want to hang straight down relative to torso (match torso angle)
+        const leftThighTarget = torso.angle; // straight down = same as torso
+        const rightThighTarget = torso.angle;
+        const leftThighError = leftThigh.angle - leftThighTarget;
+        const rightThighError = rightThigh.angle - rightThighTarget;
+
+        Body.setAngularVelocity(leftThigh,
+            leftThigh.angularVelocity * (1 - ANGULAR_DAMPING) - leftThighError * HIP_SPRING_FORCE
+        );
+        Body.setAngularVelocity(rightThigh,
+            rightThigh.angularVelocity * (1 - ANGULAR_DAMPING) - rightThighError * HIP_SPRING_FORCE
+        );
+
+        // Calves want to stay straight relative to their thigh (knee straight)
+        const leftKneeError = leftCalf.angle - leftThigh.angle;
+        const rightKneeError = rightCalf.angle - rightThigh.angle;
+
+        Body.setAngularVelocity(leftCalf,
+            leftCalf.angularVelocity * (1 - ANGULAR_DAMPING) - leftKneeError * KNEE_SPRING_FORCE
+        );
+        Body.setAngularVelocity(rightCalf,
+            rightCalf.angularVelocity * (1 - ANGULAR_DAMPING) - rightKneeError * KNEE_SPRING_FORCE
+        );
+
+        // Feet want to stay flat
+        Body.setAngularVelocity(leftFoot,
+            leftFoot.angularVelocity * (1 - ANGULAR_DAMPING * 2) - leftFoot.angle * 0.01
+        );
+        Body.setAngularVelocity(rightFoot,
+            rightFoot.angularVelocity * (1 - ANGULAR_DAMPING * 2) - rightFoot.angle * 0.01
+        );
+    }
+
     // Apply forces based on key states
-    // The control scheme works like QWOP:
-    // - J: left thigh swings forward, right thigh pulls back
-    // - R: right thigh swings forward, left thigh pulls back
-    // - E: left calf extends (straightens knee)
-    // - K: right calf extends (straightens knee)
-    // The key is alternating J/R while timing E/K to create a running gait.
+    // Controls OVERRIDE the stabilization, creating movement (and chaos).
+    // J/R swing thighs, E/K extend calves. Alternating creates a gait.
     function applyControls(runner, keys) {
         const { torso, leftThigh, rightThigh, leftCalf, rightCalf } = runner.parts;
 
-        // J key: left thigh swings forward, right pulls back slightly
+        // Always run stabilization first (keeps runner standing)
+        stabilize(runner);
+
+        const anyKeyPressed = keys.j || keys.r || keys.e || keys.k;
+
+        // When keys are pressed, reduce stabilization influence
+        // by applying stronger override forces
+        const forceMultiplier = anyKeyPressed ? 1.0 : 0.0;
+
+        // J key: left thigh swings forward (clockwise), right thigh pulls back
         if (keys.j) {
             Body.setAngularVelocity(leftThigh,
                 leftThigh.angularVelocity + HIP_TORQUE
             );
             Body.setAngularVelocity(rightThigh,
-                rightThigh.angularVelocity - HIP_TORQUE * 0.4
+                rightThigh.angularVelocity - HIP_TORQUE * 0.5
             );
-            // Counter-torque on torso for realism
             Body.setAngularVelocity(torso,
-                torso.angularVelocity - HIP_TORQUE * 0.2
+                torso.angularVelocity - HIP_TORQUE * 0.15
             );
         }
 
-        // R key: right thigh swings forward, left pulls back slightly
+        // R key: right thigh swings forward, left pulls back
         if (keys.r) {
             Body.setAngularVelocity(rightThigh,
                 rightThigh.angularVelocity + HIP_TORQUE
             );
             Body.setAngularVelocity(leftThigh,
-                leftThigh.angularVelocity - HIP_TORQUE * 0.4
+                leftThigh.angularVelocity - HIP_TORQUE * 0.5
             );
             Body.setAngularVelocity(torso,
-                torso.angularVelocity - HIP_TORQUE * 0.2
+                torso.angularVelocity - HIP_TORQUE * 0.15
             );
         }
 
-        // E key: left calf extends (straightens the knee joint)
+        // E key: left calf extends (straightens knee)
         if (keys.e) {
             Body.setAngularVelocity(leftCalf,
                 leftCalf.angularVelocity - KNEE_TORQUE
             );
-            // Reaction force on thigh
             Body.setAngularVelocity(leftThigh,
-                leftThigh.angularVelocity + KNEE_TORQUE * 0.25
+                leftThigh.angularVelocity + KNEE_TORQUE * 0.3
             );
         }
 
@@ -327,27 +407,9 @@ const Runner = (function() {
                 rightCalf.angularVelocity - KNEE_TORQUE
             );
             Body.setAngularVelocity(rightThigh,
-                rightThigh.angularVelocity + KNEE_TORQUE * 0.25
+                rightThigh.angularVelocity + KNEE_TORQUE * 0.3
             );
         }
-
-        // When no hip key is pressed, add a tiny restoring force toward vertical
-        // This makes the legs want to hang naturally rather than flail forever
-        if (!keys.j && !keys.r) {
-            const dampThigh = 0.005;
-            Body.setAngularVelocity(leftThigh,
-                leftThigh.angularVelocity * (1 - dampThigh)
-            );
-            Body.setAngularVelocity(rightThigh,
-                rightThigh.angularVelocity * (1 - dampThigh)
-            );
-        }
-
-        // Slight torso uprighting tendency (very weak -- just enough to not feel dead)
-        const uprightForce = -torso.angle * 0.003;
-        Body.setAngularVelocity(torso,
-            torso.angularVelocity + uprightForce
-        );
     }
 
     // Check if the runner has fallen (head or torso touching ground level or torso very tilted)
