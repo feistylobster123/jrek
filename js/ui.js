@@ -85,7 +85,8 @@ const UI = (function() {
         if (restartPromptEl) return;
         restartPromptEl = document.createElement('div');
         restartPromptEl.className = 'restart-prompt';
-        restartPromptEl.textContent = 'Press SPACE to try again';
+        const isMobile = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
+        restartPromptEl.textContent = isMobile ? 'Tap to try again' : 'Press SPACE to try again';
         document.body.appendChild(restartPromptEl);
     }
 

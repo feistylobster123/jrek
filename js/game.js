@@ -63,7 +63,23 @@ if (!CanvasRenderingContext2D.prototype.roundRect) {
     let targetCameraX = 0;
     let targetCameraY = 0;
 
-    // --- Input Handling ---
+    // --- Detect mobile/touch device ---
+    const isTouchDevice = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
+    const mobileControls = document.getElementById('mobileControls');
+
+    function showMobileControls() {
+        if (isTouchDevice && mobileControls) {
+            mobileControls.classList.remove('hidden');
+        }
+    }
+
+    function hideMobileControls() {
+        if (mobileControls) {
+            mobileControls.classList.add('hidden');
+        }
+    }
+
+    // --- Input Handling (Keyboard) ---
     document.addEventListener('keydown', (ev) => {
         const key = ev.key.toLowerCase();
 
@@ -94,11 +110,89 @@ if (!CanvasRenderingContext2D.prototype.roundRect) {
         }
     });
 
+    // --- Input Handling (Touch) ---
+    // Tap title screen or fallen screen to start/restart
+    document.getElementById('titleScreen').addEventListener('touchstart', (ev) => {
+        ev.preventDefault();
+        if (gameState === 'title') {
+            startGame();
+        }
+    });
+
+    canvas.addEventListener('touchstart', (ev) => {
+        if (gameState === 'fallen' && Date.now() - restartDelay > 1000) {
+            resetGame();
+            startGame();
+        }
+    });
+
+    // Touch buttons
+    if (mobileControls) {
+        const touchBtns = mobileControls.querySelectorAll('.touch-btn');
+        touchBtns.forEach(btn => {
+            const keyName = btn.getAttribute('data-key');
+
+            btn.addEventListener('touchstart', (ev) => {
+                ev.preventDefault();
+                if (gameState === 'playing' && keyName in keys) {
+                    keys[keyName] = true;
+                    btn.classList.add('pressed');
+                }
+            });
+
+            btn.addEventListener('touchend', (ev) => {
+                ev.preventDefault();
+                if (keyName in keys) {
+                    keys[keyName] = false;
+                    btn.classList.remove('pressed');
+                }
+            });
+
+            btn.addEventListener('touchcancel', (ev) => {
+                if (keyName in keys) {
+                    keys[keyName] = false;
+                    btn.classList.remove('pressed');
+                }
+            });
+
+            // Also handle mouse for testing on desktop
+            btn.addEventListener('mousedown', (ev) => {
+                ev.preventDefault();
+                if (gameState === 'playing' && keyName in keys) {
+                    keys[keyName] = true;
+                    btn.classList.add('pressed');
+                }
+            });
+
+            btn.addEventListener('mouseup', (ev) => {
+                if (keyName in keys) {
+                    keys[keyName] = false;
+                    btn.classList.remove('pressed');
+                }
+            });
+
+            btn.addEventListener('mouseleave', (ev) => {
+                if (keyName in keys) {
+                    keys[keyName] = false;
+                    btn.classList.remove('pressed');
+                }
+            });
+        });
+    }
+
+    // Prevent zooming/scrolling on mobile when playing
+    document.addEventListener('touchmove', (ev) => {
+        if (gameState === 'playing') {
+            ev.preventDefault();
+        }
+    }, { passive: false });
+
     // --- Game Lifecycle ---
     function startGame() {
         UI.hideTitleScreen();
         UI.hideFallMessage();
         UI.hideRestartPrompt();
+        showMobileControls();
 
         // Create physics engine
         engine = Engine.create({
@@ -151,6 +245,7 @@ if (!CanvasRenderingContext2D.prototype.roundRect) {
         terrain = null;
         engine = null;
         gameState = 'title';
+        hideMobileControls();
     }
 
     function handleFall() {
