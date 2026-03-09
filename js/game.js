@@ -211,7 +211,7 @@ if (!CanvasRenderingContext2D.prototype.roundRect) {
         // STANCE_HEIGHT accounts for split stance geometry (trig, not straight legs).
         const spawnX = 200;
         const groundY = Terrain.getGroundY(spawnX);
-        const spawnY = groundY - Runner.STANCE_HEIGHT + 4; // torso center: compensate for joint settling lift
+        const spawnY = groundY - Runner.STANCE_HEIGHT + 8; // torso center: push feet into ground contact
 
         // Create runner
         runner = Runner.create(spawnX, spawnY);

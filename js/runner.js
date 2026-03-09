@@ -80,7 +80,9 @@ const Runner = (function() {
     // Handles ABSOLUTE upright balance (the inverted pendulum problem).
     // Per-joint PD can't detect whole-body tilt because hip/knee relative
     // angles stay constant when the body tilts as a unit. Only the torso PD
-    // references the world frame (angle=0 = upright).
+    // references the world frame.
+    const TORSO_TARGET = 0.03;      // Target lean angle (radians). Slight forward lean
+                                     // counteracts backward drift from constraint settling.
     const TORSO_STAB_IDLE = 0.30;   // P gain: velocity correction per radian of tilt
     const TORSO_STAB_ACTIVE = 0.04; // Much weaker when keys pressed (allows lean for ground reaction)
     const TORSO_DAMP_IDLE = 0.82;   // D: multiplicative damping (1.0 = none)
@@ -337,9 +339,9 @@ const Runner = (function() {
     // that propagate through the joint chain to feet, producing ground reaction.
     // Velocity-based corrections get eaten by the constraint solver.
     // Reaction torque on parent = Newton's 3rd law = torso sway from motor effort.
-    const MOTOR_P = 0.3;      // Torque per radian of error (gentle)
-    const MOTOR_D = 0.08;     // Torque per rad/s of relative velocity (damping)
-    const MOTOR_MAX = 0.5;    // Max torque per frame (prevents explosive flips)
+    const MOTOR_P = 1.0;      // Torque per radian of error
+    const MOTOR_D = 0.2;      // Torque per rad/s of relative velocity (damping)
+    const MOTOR_MAX = 0.8;    // Max torque per frame (enough for visible motion, not instant flips)
 
     function driveJoint(parent, child, targetAngle) {
         let relAngle = child.angle - parent.angle;
@@ -411,12 +413,13 @@ const Runner = (function() {
         // --- Torso balance PD (absolute world-frame reference) ---
         // Per-joint PD only corrects relative angles. When the whole body
         // tilts as a unit, hip/knee angles don't change. Only this PD
-        // references absolute vertical (angle=0).
+        // references the world frame. Target is TORSO_TARGET (slight forward lean).
         if (!allPressed) {
             const stabStrength = anyPressed ? TORSO_STAB_ACTIVE : TORSO_STAB_IDLE;
             const dampFactor = anyPressed ? TORSO_DAMP_ACTIVE : TORSO_DAMP_IDLE;
+            const tiltError = torso.angle - TORSO_TARGET;
             Body.setAngularVelocity(torso,
-                torso.angularVelocity * dampFactor - torso.angle * stabStrength
+                torso.angularVelocity * dampFactor - tiltError * stabStrength
             );
         }
 
