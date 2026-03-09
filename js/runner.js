@@ -94,12 +94,13 @@ const Runner = (function() {
             label: 'head',
         });
 
-        // TORSO — heavy with extra air friction to dampen wild swinging
+        // TORSO — heavy, pure ragdoll. Low air friction so it falls naturally.
+        // No hidden stabilization -- this is the inverted pendulum.
         parts.torso = Bodies.rectangle(x, y, TORSO_W, TORSO_H, {
             ...bodyOptions,
             density: TORSO_DENSITY,
             label: 'torso',
-            frictionAir: 0.04,
+            frictionAir: 0.015,
         });
 
         // LEFT UPPER LEG (thigh)
@@ -263,6 +264,7 @@ const Runner = (function() {
             fallTime: 0,
             distance: 0,
             maxDistance: 0,
+            rolling: false,
         };
 
         return runner;
@@ -337,14 +339,63 @@ const Runner = (function() {
      * When no key is pressed for a joint pair, the motor brakes
      * (drives speed toward 0), keeping joints stiff.
      */
+    // === ROLLING CARTWHEEL EASTER EGG PARAMETERS ===
+    const ROLL_SPIN_TARGET = 0.18;  // Target torso angular velocity (rad/frame, ~1.7 rps)
+    const ROLL_SPIN_STRENGTH = 0.12; // How aggressively we reach target spin
+    const ROLL_FORWARD_FORCE = 0.002; // Horizontal push to keep moving forward
+    const ROLL_DOWN_FORCE = 0.0005;   // Gentle downward pull for ground contact
+
     function applyControls(runner, keys) {
         const { torso, leftThigh, rightThigh, leftCalf, rightCalf, leftFoot, rightFoot } = runner.parts;
 
+        const allPressed = keys.j && keys.r && keys.e && keys.k;
+        runner.rolling = allPressed;
+
         // --- Angular damping on all bodies (prevents perpetual spinning) ---
         // Matter.js frictionAir only damps linear velocity, not angular.
+        // Reduce torso damping during roll so it sustains the spin.
         for (const key of Object.keys(runner.parts)) {
             const part = runner.parts[key];
-            Body.setAngularVelocity(part, part.angularVelocity * ANGULAR_DAMPING);
+            const damping = (allPressed && part === torso) ? 0.995 : ANGULAR_DAMPING;
+            Body.setAngularVelocity(part, part.angularVelocity * damping);
+        }
+
+        // === Easter egg: all four keys = sloppy rolling cartwheel ===
+        if (allPressed) {
+            // Drive torso toward a sustained forward spin (clockwise in screen coords)
+            const spinError = ROLL_SPIN_TARGET - torso.angularVelocity;
+            Body.setAngularVelocity(torso, torso.angularVelocity + spinError * ROLL_SPIN_STRENGTH);
+
+            // Gentle forward + downward push. The heavy feet hitting the ground
+            // create most of the forward propulsion; this just keeps things moving.
+            Body.applyForce(torso, torso.position, {
+                x: ROLL_FORWARD_FORCE,
+                y: ROLL_DOWN_FORCE,
+            });
+
+            // Windmill leg movement: alternate which leg extends forward vs back
+            // based on the torso's rotation phase. Creates the spoke/windmill look.
+            const phase = Math.sin(torso.angle * 2);
+            applyJointMotor(torso, leftThigh, phase > 0 ? HIP_MOTOR_SPEED : -HIP_MOTOR_SPEED);
+            applyJointMotor(torso, rightThigh, phase > 0 ? -HIP_MOTOR_SPEED : HIP_MOTOR_SPEED);
+
+            // Knees mostly straight so legs extend outward like windmill blades
+            applyJointMotor(leftThigh, leftCalf, KNEE_MOTOR_SPEED * 0.4);
+            applyJointMotor(rightThigh, rightCalf, KNEE_MOTOR_SPEED * 0.4);
+
+            // Let ankles go loose
+            applyJointMotor(leftCalf, leftFoot, 0);
+            applyJointMotor(rightCalf, rightFoot, 0);
+
+            // Wider angle limits during roll so limbs can flail freely
+            enforceAngleLimit(torso, leftThigh, -2.2, 2.2);
+            enforceAngleLimit(torso, rightThigh, -2.2, 2.2);
+            enforceAngleLimit(leftThigh, leftCalf, -2.5, 0.5);
+            enforceAngleLimit(rightThigh, rightCalf, -2.5, 0.5);
+            enforceAngleLimit(leftCalf, leftFoot, -0.6, 0.6);
+            enforceAngleLimit(rightCalf, rightFoot, -0.6, 0.6);
+
+            return; // Skip normal controls
         }
 
         // --- Determine target motor speeds ---
@@ -396,6 +447,9 @@ const Runner = (function() {
 
     // Check if the runner has fallen
     function checkFallen(runner, groundY) {
+        // Can't fall while doing the barrel roll
+        if (runner.rolling) return false;
+
         const head = runner.parts.head;
         const torso = runner.parts.torso;
 
@@ -535,11 +589,12 @@ const Runner = (function() {
 
         // Exposed midriff area (skin is already drawn)
 
-        // Black shorts with gear belt
+        // Black shorts with gear belt - longer, extending past torso bottom
         const shortsTop = TORSO_H / 4;
+        const shortsLength = TORSO_H / 2 - shortsTop + 8; // +8px extends past torso
         ctx.fillStyle = shortsColor;
         ctx.beginPath();
-        ctx.roundRect(-TORSO_W / 2 - 1, shortsTop, TORSO_W + 2, TORSO_H / 2 - shortsTop + 1, [0, 0, 3, 3]);
+        ctx.roundRect(-TORSO_W / 2 - 2, shortsTop, TORSO_W + 4, shortsLength, [0, 0, 3, 3]);
         ctx.fill();
 
         // Gear belt at top of shorts
@@ -601,38 +656,40 @@ const Runner = (function() {
         ctx.arc(0, 0, HEAD_RADIUS, 0, Math.PI * 2);
         ctx.fill();
 
-        // CLIF trucker cap
-        // Cap dome (red front panel)
+        // CLIF trucker cap - centered on top of head
+        // Cap dome (red front panel) - covers top of head from back to front
         ctx.fillStyle = capRedColor;
         ctx.beginPath();
-        ctx.arc(0, -2, HEAD_RADIUS + 2, Math.PI * 1.1, Math.PI * 1.7);
-        ctx.lineTo(HEAD_RADIUS * 0.5, -HEAD_RADIUS - 3);
-        ctx.quadraticCurveTo(0, -HEAD_RADIUS - 5, -HEAD_RADIUS * 0.5, -HEAD_RADIUS - 3);
+        // Arc sitting on top of the head, centered
+        ctx.arc(0, -2, HEAD_RADIUS + 1, Math.PI * 1.15, Math.PI * 1.85);
+        // Crown bump
+        ctx.quadraticCurveTo(0, -HEAD_RADIUS - 6, 0, -HEAD_RADIUS - 4);
         ctx.closePath();
         ctx.fill();
 
         // Cap mesh (white/grey back panels)
         ctx.fillStyle = capWhiteColor;
         ctx.beginPath();
-        ctx.arc(0, -2, HEAD_RADIUS + 2, Math.PI * 1.7, Math.PI * 2.0);
-        ctx.arc(0, -2, HEAD_RADIUS + 2, 0, Math.PI * 0.3);
+        ctx.arc(0, -2, HEAD_RADIUS + 1, Math.PI * 0.15, Math.PI * 0.35);
+        ctx.lineTo(0, -HEAD_RADIUS - 4);
+        ctx.arc(0, -2, HEAD_RADIUS + 1, Math.PI * 1.85, Math.PI * 2.0);
         ctx.closePath();
         ctx.fill();
 
-        // Cap brim
+        // Cap brim - pointing right (forward), centered on forehead
         ctx.fillStyle = capBrimColor;
         ctx.beginPath();
-        ctx.moveTo(HEAD_RADIUS * 0.9, -HEAD_RADIUS * 0.3);
-        ctx.quadraticCurveTo(HEAD_RADIUS + 8, -HEAD_RADIUS * 0.5, HEAD_RADIUS + 10, -HEAD_RADIUS * 0.15);
-        ctx.quadraticCurveTo(HEAD_RADIUS + 8, HEAD_RADIUS * 0.1, HEAD_RADIUS * 0.7, -HEAD_RADIUS * 0.05);
+        ctx.moveTo(HEAD_RADIUS * 0.5, -HEAD_RADIUS * 0.5);
+        ctx.quadraticCurveTo(HEAD_RADIUS + 8, -HEAD_RADIUS * 0.6, HEAD_RADIUS + 11, -HEAD_RADIUS * 0.25);
+        ctx.quadraticCurveTo(HEAD_RADIUS + 8, HEAD_RADIUS * 0.0, HEAD_RADIUS * 0.4, -HEAD_RADIUS * 0.15);
         ctx.closePath();
         ctx.fill();
 
-        // CLIF text on cap (tiny)
+        // CLIF text on cap front (tiny)
         ctx.fillStyle = '#ffffff';
         ctx.font = 'bold 5px Arial';
         ctx.textAlign = 'center';
-        ctx.fillText('CLIF', 1, -HEAD_RADIUS + 1);
+        ctx.fillText('CLIF', 0, -HEAD_RADIUS + 2);
 
         // Eyes
         ctx.fillStyle = '#1a1208';

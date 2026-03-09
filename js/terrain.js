@@ -15,27 +15,32 @@ const Terrain = (function() {
     const ROOT_CHANCE = 0.04;       // Probability of a root obstacle per segment
 
     // Conversion: pixels to miles (the course is 100 miles)
-    // Let's say 1 mile = 2000 pixels for reasonable gameplay
-    const PIXELS_PER_MILE = 2000;
+    // 500px per mile = 50,000px total course. Much more playable scale.
+    // At ~2-5 px/frame running speed, a mile takes ~100-250 frames (~2-4 sec)
+    const PIXELS_PER_MILE = 500;
 
-    // Mile markers on the Western States course
+    // Mile markers on the Western States course (verified against official WSER data)
     const MILE_MARKERS = [
-        { mile: 0, name: 'Squaw Valley Start', elevation: 6200 },
-        { mile: 15.8, name: 'Robinson Flat', elevation: 6730 },
+        { mile: 0, name: 'Olympic Valley - START', elevation: 6200 },
+        { mile: 10.3, name: 'Lyon Ridge', elevation: 7050 },
+        { mile: 15.8, name: 'Red Star Ridge', elevation: 7000 },
         { mile: 24.4, name: 'Duncan Canyon', elevation: 4760 },
-        { mile: 30.3, name: 'Last Chance', elevation: 5230 },
-        { mile: 43.3, name: "Devil's Thumb", elevation: 4760 },
-        { mile: 47.8, name: 'El Dorado Creek', elevation: 2500 },
+        { mile: 30.3, name: 'Robinson Flat', elevation: 6730 },
+        { mile: 38, name: 'Dusty Corners', elevation: 5650 },
+        { mile: 43.3, name: 'Last Chance', elevation: 5230 },
+        { mile: 47.8, name: "Devil's Thumb", elevation: 4760 },
+        { mile: 52.9, name: 'El Dorado Creek', elevation: 2500 },
         { mile: 55.7, name: 'Michigan Bluff', elevation: 3590 },
         { mile: 62, name: 'Foresthill', elevation: 3265 },
-        { mile: 70, name: "Cal Street", elevation: 1360 },
-        { mile: 78, name: 'River Crossing', elevation: 740 },
-        { mile: 80, name: "Green Gate", elevation: 1400 },
+        { mile: 70.7, name: 'Peachstone', elevation: 1800 },
+        { mile: 78, name: 'Rucky Chucky - River Crossing', elevation: 740 },
+        { mile: 79.8, name: 'Green Gate', elevation: 1400 },
         { mile: 85.2, name: 'Auburn Lake Trails', elevation: 1580 },
         { mile: 90.7, name: 'Quarry Road', elevation: 1150 },
-        { mile: 93.5, name: 'No Hands Bridge', elevation: 740 },
-        { mile: 96.8, name: 'Robie Point', elevation: 1200 },
-        { mile: 100, name: 'Placer High School Track - FINISH', elevation: 1210 },
+        { mile: 94.3, name: 'Pointed Rocks', elevation: 1100 },
+        { mile: 96.5, name: 'No Hands Bridge', elevation: 740 },
+        { mile: 98.9, name: 'Robie Point', elevation: 1200 },
+        { mile: 100.2, name: 'Placer High School - FINISH', elevation: 1210 },
     ];
 
     // Colors
@@ -476,7 +481,7 @@ const Terrain = (function() {
     function renderRiverCrossing(ctx, cameraX, cameraY, canvasWidth, canvasHeight) {
         // River crossing at mile 78
         const riverCenterX = 78 * PIXELS_PER_MILE;
-        const riverWidth = 300; // pixels wide
+        const riverWidth = 80; // pixels wide (reasonable at new scale)
         const riverLeft = riverCenterX - riverWidth / 2;
         const riverRight = riverCenterX + riverWidth / 2;
 
@@ -537,9 +542,9 @@ const Terrain = (function() {
         });
     }
 
-    // Check if the runner has reached the finish
+    // Check if the runner has reached the finish (100.2 miles)
     function isFinished(distancePixels) {
-        return distancePixels >= 100 * PIXELS_PER_MILE;
+        return distancePixels >= 100.2 * PIXELS_PER_MILE;
     }
 
     return {
