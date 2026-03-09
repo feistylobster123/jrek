@@ -35,10 +35,11 @@ const Runner = (function() {
     const KNEE_TORQUE = 0.06;
 
     // Standing stabilization - angular springs that keep the runner upright
-    const TORSO_UPRIGHT_FORCE = 0.025;
-    const HIP_SPRING_FORCE = 0.015;
-    const KNEE_SPRING_FORCE = 0.012;
-    const ANGULAR_DAMPING = 0.15;
+    // These need to be STRONG enough to counteract gravity completely at rest.
+    const TORSO_UPRIGHT_FORCE = 0.12;
+    const HIP_SPRING_FORCE = 0.08;
+    const KNEE_SPRING_FORCE = 0.06;
+    const ANGULAR_DAMPING = 0.35;
 
     // Collision categories
     const RUNNER_CATEGORY = 0x0002;
@@ -262,8 +263,8 @@ const Runner = (function() {
             pointA: { x: -4, y: TORSO_H / 2 },
             bodyB: parts.leftCalf,
             pointB: { x: 0, y: -LOWER_LEG_H / 4 },
-            stiffness: 0.05,
-            damping: 0.2,
+            stiffness: 0.15,
+            damping: 0.3,
             length: UPPER_LEG_H + LOWER_LEG_H / 4,
             label: 'leftLegBrace',
         }));
@@ -274,8 +275,8 @@ const Runner = (function() {
             pointA: { x: 4, y: TORSO_H / 2 },
             bodyB: parts.rightCalf,
             pointB: { x: 0, y: -LOWER_LEG_H / 4 },
-            stiffness: 0.05,
-            damping: 0.2,
+            stiffness: 0.15,
+            damping: 0.3,
             length: UPPER_LEG_H + LOWER_LEG_H / 4,
             label: 'rightLegBrace',
         }));
@@ -343,10 +344,10 @@ const Runner = (function() {
 
         // Feet want to stay flat
         Body.setAngularVelocity(leftFoot,
-            leftFoot.angularVelocity * (1 - ANGULAR_DAMPING * 2) - leftFoot.angle * 0.01
+            leftFoot.angularVelocity * (1 - ANGULAR_DAMPING * 2) - leftFoot.angle * 0.05
         );
         Body.setAngularVelocity(rightFoot,
-            rightFoot.angularVelocity * (1 - ANGULAR_DAMPING * 2) - rightFoot.angle * 0.01
+            rightFoot.angularVelocity * (1 - ANGULAR_DAMPING * 2) - rightFoot.angle * 0.05
         );
     }
 
