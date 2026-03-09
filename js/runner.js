@@ -29,39 +29,40 @@ const Runner = (function() {
     const FOOT_W = 22 * SCALE;
     const FOOT_H = 7 * SCALE;
 
-    // === MASS DISTRIBUTION (QWOP-inspired) ===
-    // Heavy torso + very heavy feet = low center of mass = pendulum stability
-    const TORSO_DENSITY = 0.006;    // Heaviest segment (like real human)
-    const LIMB_DENSITY = 0.001;     // Light limbs
-    const FOOT_DENSITY = 0.02;      // 20x limb density (QWOP's key insight)
-    const HEAD_DENSITY = 0.0003;    // Near-massless (just for visual/collision)
+    // === MASS DISTRIBUTION ===
+    // Heavy torso = inverted pendulum that wants to fall.
+    // Moderate feet = enough to anchor but NOT catapult the body.
+    const TORSO_DENSITY = 0.006;
+    const LIMB_DENSITY = 0.001;
+    const FOOT_DENSITY = 0.004;     // 4x limb (was 20x, which launched the body)
+    const HEAD_DENSITY = 0.0005;
 
     // === SURFACE FRICTION ===
     const BODY_FRICTION = 0.6;
-    const BODY_RESTITUTION = 0.02;
-    const FOOT_FRICTION = 5.0;      // Very high — feet grip the trail (QWOP uses 5.0)
+    const BODY_RESTITUTION = 0.01;
+    const FOOT_FRICTION = 3.0;      // High grip but not insane
 
     // === JOINT MOTOR PARAMETERS ===
-    // Motors drive relative angular velocity between connected bodies.
-    // When active (key pressed): motor drives toward target speed.
-    // When inactive (key released): motor brakes (drives toward speed 0).
-    const HIP_MOTOR_SPEED = 0.15;   // Target relative angular velocity (rad/frame)
-    const KNEE_MOTOR_SPEED = 0.15;  // Target relative angular velocity (rad/frame)
-    const MOTOR_STRENGTH = 0.3;     // How aggressively motor reaches target (0-1)
-    const BRAKE_STRENGTH = 0.15;    // How aggressively motor brakes (0-1)
+    // Motors now use body.torque (like Box2D) instead of setAngularVelocity.
+    // Torque creates angular ACCELERATION that must fight gravity and inertia.
+    // This is what makes QWOP feel heavy -- you can't just spin legs freely.
+    const HIP_MOTOR_SPEED = 0.08;   // Target relative angular velocity (rad/frame)
+    const KNEE_MOTOR_SPEED = 0.08;  // Target relative angular velocity (rad/frame)
+    const HIP_MAX_TORQUE = 0.4;     // Max torque the hip motor can exert
+    const KNEE_MAX_TORQUE = 0.3;    // Max torque the knee motor can exert
+    const BRAKE_TORQUE = 0.15;      // Braking torque when no key pressed
+    const MOTOR_GAIN = 5.0;         // P-controller gain (how fast motor responds)
 
     // === JOINT ANGLE LIMITS ===
-    // Relative angle of child body to parent body.
-    // Positive = clockwise rotation in screen coords (y-down).
-    const HIP_MIN_ANGLE = -1.2;     // ~-69° (leg behind torso)
-    const HIP_MAX_ANGLE = 1.2;      // ~+69° (leg in front of torso)
-    const KNEE_MIN_ANGLE = -2.0;    // ~-115° (fully bent, heel toward butt)
-    const KNEE_MAX_ANGLE = 0.1;     // Slightly past straight (tiny tolerance)
-    const ANKLE_MIN_ANGLE = -0.25;  // Nearly rigid
-    const ANKLE_MAX_ANGLE = 0.25;   // Nearly rigid
+    const HIP_MIN_ANGLE = -1.0;     // ~-57 deg (leg behind torso)
+    const HIP_MAX_ANGLE = 1.0;      // ~+57 deg (leg in front)
+    const KNEE_MIN_ANGLE = -1.8;    // ~-103 deg (heel toward butt)
+    const KNEE_MAX_ANGLE = 0.05;    // Barely past straight
+    const ANKLE_MIN_ANGLE = -0.2;   // Nearly rigid
+    const ANKLE_MAX_ANGLE = 0.2;    // Nearly rigid
 
     // === DAMPING ===
-    const ANGULAR_DAMPING = 0.97;   // Per-frame angular velocity decay (prevents wild spinning)
+    const ANGULAR_DAMPING = 0.95;   // Stronger damping to prevent wild spinning
 
     // Constraint stiffness
     const JOINT_STIFFNESS = 1.0;
@@ -282,27 +283,26 @@ const Runner = (function() {
         Composite.remove(world, runner.constraints);
     }
 
-    // === JOINT MOTOR ===
-    // Simulates a Box2D-style revolute joint motor in Matter.js.
-    // Drives relative angular velocity between parent and child toward targetSpeed.
-    // When targetSpeed is 0, acts as a brake (resists rotation = stiff joint).
-    function applyJointMotor(parent, child, targetSpeed) {
+    // === JOINT MOTOR (TORQUE-BASED) ===
+    // Simulates a Box2D revolute joint motor using body.torque.
+    // Unlike setAngularVelocity (which bypasses physics), torque creates
+    // angular ACCELERATION that must fight gravity and inertia.
+    // This is why QWOP feels heavy -- motors can't overpower gravity easily.
+    function applyJointMotor(parent, child, targetSpeed, maxTorque) {
         const relAngVel = child.angularVelocity - parent.angularVelocity;
-        const isActive = targetSpeed !== 0;
-        const strength = isActive ? MOTOR_STRENGTH : BRAKE_STRENGTH;
 
-        const error = targetSpeed - relAngVel;
-        const impulse = error * strength;
+        // P-controller: torque proportional to velocity error
+        let torque = (targetSpeed - relAngVel) * MOTOR_GAIN;
 
-        // Distribute impulse by inverse inertia (lighter body moves more)
-        // This is Newton's 3rd law — equal and opposite torques, but
-        // angular acceleration = torque / inertia, so lighter body accelerates more.
-        const totalI = parent.inertia + child.inertia;
-        const childShare = parent.inertia / totalI;
-        const parentShare = child.inertia / totalI;
+        // Clamp to max motor torque (this is the key limiter)
+        if (torque > maxTorque) torque = maxTorque;
+        if (torque < -maxTorque) torque = -maxTorque;
 
-        Body.setAngularVelocity(child, child.angularVelocity + impulse * childShare);
-        Body.setAngularVelocity(parent, parent.angularVelocity - impulse * parentShare);
+        // Newton's 3rd law: equal and opposite torques.
+        // The physics engine handles the rest -- lighter bodies accelerate
+        // more because angular_accel = torque / inertia.
+        child.torque += torque;
+        parent.torque -= torque;
     }
 
     // === ANGLE LIMIT ENFORCEMENT ===
@@ -339,11 +339,9 @@ const Runner = (function() {
      * When no key is pressed for a joint pair, the motor brakes
      * (drives speed toward 0), keeping joints stiff.
      */
-    // === ROLLING CARTWHEEL EASTER EGG PARAMETERS ===
-    const ROLL_SPIN_TARGET = 0.18;  // Target torso angular velocity (rad/frame, ~1.7 rps)
-    const ROLL_SPIN_STRENGTH = 0.12; // How aggressively we reach target spin
-    const ROLL_FORWARD_FORCE = 0.002; // Horizontal push to keep moving forward
-    const ROLL_DOWN_FORCE = 0.0005;   // Gentle downward pull for ground contact
+    // === ROLLING CARTWHEEL EASTER EGG ===
+    const ROLL_TORQUE = 0.6;          // Torque to spin the torso
+    const ROLL_FORWARD_FORCE = 0.001; // Small forward push
 
     function applyControls(runner, keys) {
         const { torso, leftThigh, rightThigh, leftCalf, rightCalf, leftFoot, rightFoot } = runner.parts;
@@ -353,41 +351,32 @@ const Runner = (function() {
 
         // --- Angular damping on all bodies (prevents perpetual spinning) ---
         // Matter.js frictionAir only damps linear velocity, not angular.
-        // Reduce torso damping during roll so it sustains the spin.
         for (const key of Object.keys(runner.parts)) {
             const part = runner.parts[key];
-            const damping = (allPressed && part === torso) ? 0.995 : ANGULAR_DAMPING;
+            const damping = (allPressed && part === torso) ? 0.99 : ANGULAR_DAMPING;
             Body.setAngularVelocity(part, part.angularVelocity * damping);
         }
 
-        // === Easter egg: all four keys = sloppy rolling cartwheel ===
+        // === Easter egg: all four keys = rolling cartwheel ===
         if (allPressed) {
-            // Drive torso toward a sustained forward spin (clockwise in screen coords)
-            const spinError = ROLL_SPIN_TARGET - torso.angularVelocity;
-            Body.setAngularVelocity(torso, torso.angularVelocity + spinError * ROLL_SPIN_STRENGTH);
-
-            // Gentle forward + downward push. The heavy feet hitting the ground
-            // create most of the forward propulsion; this just keeps things moving.
+            // Apply spin torque to torso (torque-based, not velocity)
+            torso.torque += ROLL_TORQUE;
+            // Gentle forward push
             Body.applyForce(torso, torso.position, {
                 x: ROLL_FORWARD_FORCE,
-                y: ROLL_DOWN_FORCE,
+                y: 0,
             });
 
-            // Windmill leg movement: alternate which leg extends forward vs back
-            // based on the torso's rotation phase. Creates the spoke/windmill look.
+            // Windmill legs via torque
             const phase = Math.sin(torso.angle * 2);
-            applyJointMotor(torso, leftThigh, phase > 0 ? HIP_MOTOR_SPEED : -HIP_MOTOR_SPEED);
-            applyJointMotor(torso, rightThigh, phase > 0 ? -HIP_MOTOR_SPEED : HIP_MOTOR_SPEED);
+            applyJointMotor(torso, leftThigh, phase > 0 ? HIP_MOTOR_SPEED : -HIP_MOTOR_SPEED, HIP_MAX_TORQUE);
+            applyJointMotor(torso, rightThigh, phase > 0 ? -HIP_MOTOR_SPEED : HIP_MOTOR_SPEED, HIP_MAX_TORQUE);
+            applyJointMotor(leftThigh, leftCalf, KNEE_MOTOR_SPEED * 0.4, KNEE_MAX_TORQUE);
+            applyJointMotor(rightThigh, rightCalf, KNEE_MOTOR_SPEED * 0.4, KNEE_MAX_TORQUE);
+            applyJointMotor(leftCalf, leftFoot, 0, BRAKE_TORQUE);
+            applyJointMotor(rightCalf, rightFoot, 0, BRAKE_TORQUE);
 
-            // Knees mostly straight so legs extend outward like windmill blades
-            applyJointMotor(leftThigh, leftCalf, KNEE_MOTOR_SPEED * 0.4);
-            applyJointMotor(rightThigh, rightCalf, KNEE_MOTOR_SPEED * 0.4);
-
-            // Let ankles go loose
-            applyJointMotor(leftCalf, leftFoot, 0);
-            applyJointMotor(rightCalf, rightFoot, 0);
-
-            // Wider angle limits during roll so limbs can flail freely
+            // Wider angle limits during roll
             enforceAngleLimit(torso, leftThigh, -2.2, 2.2);
             enforceAngleLimit(torso, rightThigh, -2.2, 2.2);
             enforceAngleLimit(leftThigh, leftCalf, -2.5, 0.5);
@@ -395,19 +384,16 @@ const Runner = (function() {
             enforceAngleLimit(leftCalf, leftFoot, -0.6, 0.6);
             enforceAngleLimit(rightCalf, rightFoot, -0.6, 0.6);
 
-            return; // Skip normal controls
+            return;
         }
 
         // --- Determine target motor speeds ---
         // Each key drives BOTH legs of the pair in opposite directions.
-        // This creates the natural reciprocal motion of running.
         let leftHipTarget = 0;
         let rightHipTarget = 0;
         let leftKneeTarget = 0;
         let rightKneeTarget = 0;
 
-        // J: swing right thigh forward, left thigh backward
-        // R: swing left thigh forward, right thigh backward
         if (keys.j && !keys.r) {
             leftHipTarget = -HIP_MOTOR_SPEED;
             rightHipTarget = HIP_MOTOR_SPEED;
@@ -415,9 +401,7 @@ const Runner = (function() {
             leftHipTarget = HIP_MOTOR_SPEED;
             rightHipTarget = -HIP_MOTOR_SPEED;
         }
-        // Both pressed or neither = brake (target speed 0)
 
-        // E/K: swing calves in opposite directions
         if (keys.e && !keys.k) {
             leftKneeTarget = KNEE_MOTOR_SPEED;
             rightKneeTarget = -KNEE_MOTOR_SPEED;
@@ -426,15 +410,17 @@ const Runner = (function() {
             rightKneeTarget = KNEE_MOTOR_SPEED;
         }
 
-        // --- Apply joint motors ---
-        applyJointMotor(torso, leftThigh, leftHipTarget);
-        applyJointMotor(torso, rightThigh, rightHipTarget);
-        applyJointMotor(leftThigh, leftCalf, leftKneeTarget);
-        applyJointMotor(rightThigh, rightCalf, rightKneeTarget);
+        // --- Apply joint motors (torque-based) ---
+        const anyHipKey = keys.j || keys.r;
+        const anyKneeKey = keys.e || keys.k;
+        applyJointMotor(torso, leftThigh, leftHipTarget, anyHipKey ? HIP_MAX_TORQUE : BRAKE_TORQUE);
+        applyJointMotor(torso, rightThigh, rightHipTarget, anyHipKey ? HIP_MAX_TORQUE : BRAKE_TORQUE);
+        applyJointMotor(leftThigh, leftCalf, leftKneeTarget, anyKneeKey ? KNEE_MAX_TORQUE : BRAKE_TORQUE);
+        applyJointMotor(rightThigh, rightCalf, rightKneeTarget, anyKneeKey ? KNEE_MAX_TORQUE : BRAKE_TORQUE);
 
-        // Ankles: always brake (keep feet relatively flat)
-        applyJointMotor(leftCalf, leftFoot, 0);
-        applyJointMotor(rightCalf, rightFoot, 0);
+        // Ankles: always brake
+        applyJointMotor(leftCalf, leftFoot, 0, BRAKE_TORQUE);
+        applyJointMotor(rightCalf, rightFoot, 0, BRAKE_TORQUE);
 
         // --- Enforce angle limits ---
         enforceAngleLimit(torso, leftThigh, HIP_MIN_ANGLE, HIP_MAX_ANGLE);
