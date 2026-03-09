@@ -2,10 +2,13 @@
  * JREK Runner - Ragdoll physics body for Scott Jurek
  * Built with Matter.js rigid bodies and constraints
  *
- * Physics: QWOP-style paired joint motors.
- * - Body is RIGID at rest (joints locked, no collapse)
- * - J/R drive hips only (knees stay locked)
- * - E/K drive knees only (hips stay locked)
+ * v0.8 Physics: Nick's simplified rigid-body approach.
+ * - Body is a RIGID STRUCTURE when no buttons pressed.
+ *   Every joint has a PD controller holding it at its rest angle.
+ *   No separate torso stabilization -- rigidity comes from ALL joints
+ *   acting as one unit. The whole body is an inverted pendulum.
+ * - J/R drive hips only (knees + ankles stay locked)
+ * - E/K drive knees only (hips + ankles stay locked)
  * - Ankles always locked
  * - Split stance start: legs apart, knees slightly bent, feet on ground
  */
@@ -49,43 +52,43 @@ const Runner = (function() {
     const FOOT_FRICTION = 3.0;
 
     // === JOINT MOTOR PARAMETERS ===
+    // Used when actively driving a joint (button pressed).
     const HIP_MOTOR_SPEED = 0.12;
     const KNEE_MOTOR_SPEED = 0.12;
-    const HIP_MAX_TORQUE = 1.8;   // Reduced from 2.5 - less reaction torque on torso
-    const KNEE_MAX_TORQUE = 1.4;   // Reduced from 2.0
-    const BRAKE_TORQUE = 2.0;
-    const MOTOR_GAIN = 6.0;        // Reduced from 8.0 - smoother motor ramp-up
+    const HIP_MAX_TORQUE = 2.5;
+    const KNEE_MAX_TORQUE = 2.0;
+    const MOTOR_GAIN = 8.0;
 
-    // === JOINT LOCKING ===
-    // Kills relative angular velocity between two connected bodies.
-    // At LOCK_RATE=0.95, joints lose 95% of relative rotation each frame.
-    // This makes them effectively rigid without fighting the physics engine.
-    const LOCK_RATE = 0.95;
+    // === JOINT LOCKING (VELOCITY-BASED PD PER JOINT) ===
+    // Every joint uses a PD controller to hold its rest angle.
+    // This is the ONLY stabilization system -- no separate torso PD.
+    // CRITICAL: uses velocity corrections, NOT torques. Torque-based PD
+    // fights Matter.js's spring constraints and injects energy until blowup.
+    // Velocity corrections work WITH the constraint solver.
+    const LOCK_DAMP = 0.95;     // Kill 95% of relative angular velocity per frame
+    const LOCK_POS_GAIN = 0.15; // Position correction: velocity += error * gain
+
+    // === JOINT REST ANGLES (from split stance geometry) ===
+    // These are the relative angles between parent and child at spawn.
+    // When locked, joints are driven back toward these angles.
+    const LEFT_HIP_REST = HIP_SPLIT;                  //  0.35 (left thigh forward)
+    const RIGHT_HIP_REST = -HIP_SPLIT;                // -0.35 (right thigh back)
+    const LEFT_KNEE_REST = -KNEE_BEND;                // -0.12 (left knee bends back)
+    const RIGHT_KNEE_REST = KNEE_BEND;                //  0.12 (right knee bends forward)
+    const LEFT_ANKLE_REST = -(HIP_SPLIT - KNEE_BEND); // -0.23 (keeps left foot flat)
+    const RIGHT_ANKLE_REST = (HIP_SPLIT - KNEE_BEND); //  0.23 (keeps right foot flat)
 
     // === JOINT ANGLE LIMITS ===
     const HIP_MIN_ANGLE = -1.0;
     const HIP_MAX_ANGLE = 1.0;
     const KNEE_MIN_ANGLE = -1.8;
-    const KNEE_MAX_ANGLE = 0.05;
-    const ANKLE_MIN_ANGLE = -0.2;
-    const ANKLE_MAX_ANGLE = 0.2;
-
-    // === DAMPING ===
-    const ANGULAR_DAMPING = 0.96;
-    const MAX_ANGULAR_VEL = 0.3;
+    const KNEE_MAX_ANGLE = 0.5;
+    const ANKLE_MIN_ANGLE = -0.8;
+    const ANKLE_MAX_ANGLE = 0.8;
 
     // Constraint stiffness
     const JOINT_STIFFNESS = 1.0;
     const JOINT_DAMPING = 0.5;
-
-    // === TORSO STABILIZATION (VELOCITY-BASED PD WITH SMOOTH BLENDING) ===
-    // Directly sets angular velocity each frame for responsive stability.
-    // Gains smoothly blend between idle/active to prevent glitchy snapping.
-    const TORSO_STAB_IDLE = 0.30;   // P gain: velocity correction per radian of tilt
-    const TORSO_STAB_ACTIVE = 0.05; // Weaker when keys pressed (precarious balance)
-    const TORSO_DAMP_IDLE = 0.85;   // D: multiplicative damping (1.0 = none)
-    const TORSO_DAMP_ACTIVE = 0.94; // Less damping during active control
-    const STAB_BLEND_RATE = 0.06;   // Smooth transition rate (0-1 per frame, ~17 frames to 63%)
 
     // === ROLLING CARTWHEEL EASTER EGG ===
     const ROLL_TORQUE = 0.6;
@@ -95,10 +98,25 @@ const Runner = (function() {
     const RUNNER_CATEGORY = 0x0002;
     const GROUND_CATEGORY = 0x0001;
 
-    // --- Joint lock: kill relative angular velocity ---
-    function lockJoint(parent, child) {
+    // --- Lock a joint at a target relative angle using velocity-based PD ---
+    // Works WITH Matter.js constraints instead of fighting them.
+    // D: kills relative angular velocity (makes joint rigid)
+    // P: nudges child toward rest angle (corrects drift from gravity)
+    function lockJoint(parent, child, restAngle) {
+        let relAngle = child.angle - parent.angle;
+        while (relAngle > Math.PI) relAngle -= 2 * Math.PI;
+        while (relAngle < -Math.PI) relAngle += 2 * Math.PI;
         const relAngVel = child.angularVelocity - parent.angularVelocity;
-        Body.setAngularVelocity(child, child.angularVelocity - relAngVel * LOCK_RATE);
+        const angleError = restAngle - relAngle;
+
+        // D: kill relative velocity
+        const dampCorrection = -relAngVel * LOCK_DAMP;
+        // P: push toward rest angle
+        const posCorrection = angleError * LOCK_POS_GAIN;
+
+        Body.setAngularVelocity(child,
+            child.angularVelocity + dampCorrection + posCorrection
+        );
     }
 
     function create(x, y) {
@@ -133,9 +151,6 @@ const Runner = (function() {
         });
 
         // === SPLIT STANCE BODY POSITIONING ===
-        // Each body part is placed along its kinematic chain using trig.
-        // Left leg goes forward, right leg goes backward.
-
         const leftHipX = x - 3;
         const leftHipY = y + TORSO_H / 2;
         const rightHipX = x + 3;
@@ -157,13 +172,13 @@ const Runner = (function() {
             ...bodyOptions, density: LIMB_DENSITY, label: 'rightThigh', angle: rtAngle
         });
 
-        // Knee positions (bottom of thighs)
+        // Knee positions
         const leftKneeX = leftHipX + Math.sin(ltAngle) * UPPER_LEG_H;
         const leftKneeY = leftHipY + Math.cos(ltAngle) * UPPER_LEG_H;
         const rightKneeX = rightHipX + Math.sin(rtAngle) * UPPER_LEG_H;
         const rightKneeY = rightHipY + Math.cos(rtAngle) * UPPER_LEG_H;
 
-        // LEFT CALF: thigh angle minus knee bend (bends back relative to thigh)
+        // LEFT CALF: thigh angle minus knee bend
         const lcAngle = ltAngle - KNEE_BEND;
         const lcCenterX = leftKneeX + Math.sin(lcAngle) * LOWER_LEG_H / 2;
         const lcCenterY = leftKneeY + Math.cos(lcAngle) * LOWER_LEG_H / 2;
@@ -179,159 +194,104 @@ const Runner = (function() {
             ...bodyOptions, density: LIMB_DENSITY, label: 'rightCalf', angle: rcAngle
         });
 
-        // Ankle positions (bottom of calves)
+        // Ankle positions
         const leftAnkleX = leftKneeX + Math.sin(lcAngle) * LOWER_LEG_H;
         const leftAnkleY = leftKneeY + Math.cos(lcAngle) * LOWER_LEG_H;
         const rightAnkleX = rightKneeX + Math.sin(rcAngle) * LOWER_LEG_H;
         const rightAnkleY = rightKneeY + Math.cos(rcAngle) * LOWER_LEG_H;
 
-        // LEFT FOOT: flat on ground (angle 0)
+        // LEFT FOOT: flat on ground
         parts.leftFoot = Bodies.rectangle(leftAnkleX, leftAnkleY + FOOT_H / 2, FOOT_W, FOOT_H, {
             ...bodyOptions, density: FOOT_DENSITY, friction: FOOT_FRICTION, label: 'leftFoot'
         });
 
-        // RIGHT FOOT: flat on ground (angle 0)
+        // RIGHT FOOT: flat on ground
         parts.rightFoot = Bodies.rectangle(rightAnkleX, rightAnkleY + FOOT_H / 2, FOOT_W, FOOT_H, {
             ...bodyOptions, density: FOOT_DENSITY, friction: FOOT_FRICTION, label: 'rightFoot'
         });
 
         // === CONSTRAINTS (pin joints) ===
 
-        // Neck: head to torso
+        // Neck
         constraints.push(Constraint.create({
-            bodyA: parts.head,
-            pointA: { x: 0, y: HEAD_RADIUS * 0.8 },
-            bodyB: parts.torso,
-            pointB: { x: 0, y: -TORSO_H / 2 },
-            stiffness: 0.9,
-            damping: 0.5,
-            length: 2,
-            label: 'neck',
+            bodyA: parts.head, pointA: { x: 0, y: HEAD_RADIUS * 0.8 },
+            bodyB: parts.torso, pointB: { x: 0, y: -TORSO_H / 2 },
+            stiffness: 0.9, damping: 0.5, length: 2, label: 'neck',
         }));
 
         // Head stabilizer
         constraints.push(Constraint.create({
-            bodyA: parts.head,
-            pointA: { x: 0, y: 0 },
-            bodyB: parts.torso,
-            pointB: { x: 0, y: -TORSO_H / 2 + 5 },
-            stiffness: 0.3,
-            damping: 0.3,
-            length: HEAD_RADIUS + 5,
-            label: 'headStabilizer',
+            bodyA: parts.head, pointA: { x: 0, y: 0 },
+            bodyB: parts.torso, pointB: { x: 0, y: -TORSO_H / 2 + 5 },
+            stiffness: 0.3, damping: 0.3, length: HEAD_RADIUS + 5, label: 'headStabilizer',
         }));
 
         // Left Hip
         constraints.push(Constraint.create({
-            bodyA: parts.torso,
-            pointA: { x: -3, y: TORSO_H / 2 },
-            bodyB: parts.leftThigh,
-            pointB: { x: 0, y: -UPPER_LEG_H / 2 },
-            stiffness: JOINT_STIFFNESS,
-            damping: JOINT_DAMPING,
-            length: 0,
-            label: 'leftHip',
+            bodyA: parts.torso, pointA: { x: -3, y: TORSO_H / 2 },
+            bodyB: parts.leftThigh, pointB: { x: 0, y: -UPPER_LEG_H / 2 },
+            stiffness: JOINT_STIFFNESS, damping: JOINT_DAMPING, length: 0, label: 'leftHip',
         }));
 
         // Right Hip
         constraints.push(Constraint.create({
-            bodyA: parts.torso,
-            pointA: { x: 3, y: TORSO_H / 2 },
-            bodyB: parts.rightThigh,
-            pointB: { x: 0, y: -UPPER_LEG_H / 2 },
-            stiffness: JOINT_STIFFNESS,
-            damping: JOINT_DAMPING,
-            length: 0,
-            label: 'rightHip',
+            bodyA: parts.torso, pointA: { x: 3, y: TORSO_H / 2 },
+            bodyB: parts.rightThigh, pointB: { x: 0, y: -UPPER_LEG_H / 2 },
+            stiffness: JOINT_STIFFNESS, damping: JOINT_DAMPING, length: 0, label: 'rightHip',
         }));
 
         // Left Knee
         constraints.push(Constraint.create({
-            bodyA: parts.leftThigh,
-            pointA: { x: 0, y: UPPER_LEG_H / 2 },
-            bodyB: parts.leftCalf,
-            pointB: { x: 0, y: -LOWER_LEG_H / 2 },
-            stiffness: JOINT_STIFFNESS,
-            damping: JOINT_DAMPING,
-            length: 0,
-            label: 'leftKnee',
+            bodyA: parts.leftThigh, pointA: { x: 0, y: UPPER_LEG_H / 2 },
+            bodyB: parts.leftCalf, pointB: { x: 0, y: -LOWER_LEG_H / 2 },
+            stiffness: JOINT_STIFFNESS, damping: JOINT_DAMPING, length: 0, label: 'leftKnee',
         }));
 
         // Right Knee
         constraints.push(Constraint.create({
-            bodyA: parts.rightThigh,
-            pointA: { x: 0, y: UPPER_LEG_H / 2 },
-            bodyB: parts.rightCalf,
-            pointB: { x: 0, y: -LOWER_LEG_H / 2 },
-            stiffness: JOINT_STIFFNESS,
-            damping: JOINT_DAMPING,
-            length: 0,
-            label: 'rightKnee',
+            bodyA: parts.rightThigh, pointA: { x: 0, y: UPPER_LEG_H / 2 },
+            bodyB: parts.rightCalf, pointB: { x: 0, y: -LOWER_LEG_H / 2 },
+            stiffness: JOINT_STIFFNESS, damping: JOINT_DAMPING, length: 0, label: 'rightKnee',
         }));
 
         // Left Ankle
         constraints.push(Constraint.create({
-            bodyA: parts.leftCalf,
-            pointA: { x: 0, y: LOWER_LEG_H / 2 },
-            bodyB: parts.leftFoot,
-            pointB: { x: -2, y: 0 },
-            stiffness: 0.9,
-            damping: 0.4,
-            length: 0,
-            label: 'leftAnkle',
+            bodyA: parts.leftCalf, pointA: { x: 0, y: LOWER_LEG_H / 2 },
+            bodyB: parts.leftFoot, pointB: { x: -2, y: 0 },
+            stiffness: 0.9, damping: 0.4, length: 0, label: 'leftAnkle',
         }));
 
         // Right Ankle
         constraints.push(Constraint.create({
-            bodyA: parts.rightCalf,
-            pointA: { x: 0, y: LOWER_LEG_H / 2 },
-            bodyB: parts.rightFoot,
-            pointB: { x: -2, y: 0 },
-            stiffness: 0.9,
-            damping: 0.4,
-            length: 0,
-            label: 'rightAnkle',
+            bodyA: parts.rightCalf, pointA: { x: 0, y: LOWER_LEG_H / 2 },
+            bodyB: parts.rightFoot, pointB: { x: -2, y: 0 },
+            stiffness: 0.9, damping: 0.4, length: 0, label: 'rightAnkle',
         }));
 
         // === STRUCTURAL BRACES ===
-        // Matter.js constraints are springs, not rigid joints.
         // Full-leg braces prevent positional collapse under gravity.
-        // Lengths computed from actual split stance geometry (not straight-leg).
 
-        // Left full-leg brace: hip attach to foot center
         const leftBraceLen = Math.sqrt(
             (parts.leftFoot.position.x - (x - 3)) ** 2 +
             (parts.leftFoot.position.y - (y + TORSO_H / 2)) ** 2
         );
         constraints.push(Constraint.create({
-            bodyA: parts.torso,
-            pointA: { x: -3, y: TORSO_H / 2 },
-            bodyB: parts.leftFoot,
-            pointB: { x: 0, y: 0 },
-            stiffness: 0.15,
-            damping: 0.3,
-            length: leftBraceLen,
-            label: 'leftFullLeg',
+            bodyA: parts.torso, pointA: { x: -3, y: TORSO_H / 2 },
+            bodyB: parts.leftFoot, pointB: { x: 0, y: 0 },
+            stiffness: 0.3, damping: 0.3, length: leftBraceLen, label: 'leftFullLeg',
         }));
 
-        // Right full-leg brace
         const rightBraceLen = Math.sqrt(
             (parts.rightFoot.position.x - (x + 3)) ** 2 +
             (parts.rightFoot.position.y - (y + TORSO_H / 2)) ** 2
         );
         constraints.push(Constraint.create({
-            bodyA: parts.torso,
-            pointA: { x: 3, y: TORSO_H / 2 },
-            bodyB: parts.rightFoot,
-            pointB: { x: 0, y: 0 },
-            stiffness: 0.15,
-            damping: 0.3,
-            length: rightBraceLen,
-            label: 'rightFullLeg',
+            bodyA: parts.torso, pointA: { x: 3, y: TORSO_H / 2 },
+            bodyB: parts.rightFoot, pointB: { x: 0, y: 0 },
+            stiffness: 0.3, damping: 0.3, length: rightBraceLen, label: 'rightFullLeg',
         }));
 
-        // Thigh cross-brace: prevents doing the splits.
-        // Length computed from actual split stance geometry.
+        // Thigh cross-brace
         const braceY = UPPER_LEG_H / 3;
         const ltBraceWorld = {
             x: ltCenterX + Math.sin(ltAngle) * braceY,
@@ -346,14 +306,9 @@ const Runner = (function() {
             (ltBraceWorld.y - rtBraceWorld.y) ** 2
         );
         constraints.push(Constraint.create({
-            bodyA: parts.leftThigh,
-            pointA: { x: 0, y: UPPER_LEG_H / 3 },
-            bodyB: parts.rightThigh,
-            pointB: { x: 0, y: UPPER_LEG_H / 3 },
-            stiffness: 0.12,
-            damping: 0.3,
-            length: thighBraceLen,
-            label: 'thighBrace',
+            bodyA: parts.leftThigh, pointA: { x: 0, y: UPPER_LEG_H / 3 },
+            bodyB: parts.rightThigh, pointB: { x: 0, y: UPPER_LEG_H / 3 },
+            stiffness: 0.2, damping: 0.3, length: thighBraceLen, label: 'thighBrace',
         }));
 
         const runner = {
@@ -365,7 +320,6 @@ const Runner = (function() {
             distance: 0,
             maxDistance: 0,
             rolling: false,
-            stabBlend: 0, // 0 = full idle stabilization, 1 = full active
         };
 
         return runner;
@@ -414,50 +368,22 @@ const Runner = (function() {
     /**
      * Core control function -- called every physics frame.
      *
-     * SIMPLIFIED CONTROLS:
-     * - J/R = hips only (knees LOCKED, don't bend)
-     * - E/K = knees only (hips LOCKED, don't move)
-     * - No keys = ALL joints locked rigid
-     * - All four = rolling easter egg
+     * NICK'S SIMPLIFIED APPROACH:
+     * - No separate torso PD controller
+     * - No per-frame angular damping loop
+     * - ONE system: per-joint PD locks that hold rest angles
+     * - When idle: ALL joints locked at rest angles = rigid body
+     * - J/R: drive hips with motors, everything else locked
+     * - E/K: drive knees with motors, everything else locked
+     * - All four: rolling easter egg
      */
     function applyControls(runner, keys) {
         const { torso, leftThigh, rightThigh, leftCalf, rightCalf, leftFoot, rightFoot } = runner.parts;
 
         const allPressed = keys.j && keys.r && keys.e && keys.k;
-        const anyPressed = keys.j || keys.r || keys.e || keys.k;
         const anyHipKey = keys.j || keys.r;
         const anyKneeKey = keys.e || keys.k;
         runner.rolling = allPressed;
-
-        // --- Angular damping + velocity clamping ---
-        // Limbs get damping + clamping. Torso only gets mild damping during
-        // rolling (PD handles torso stability otherwise).
-        for (const key of Object.keys(runner.parts)) {
-            const part = runner.parts[key];
-            if (part === torso && !allPressed) continue; // PD handles torso
-            const damping = (allPressed && part === torso) ? 0.99 : ANGULAR_DAMPING;
-            let av = part.angularVelocity * damping;
-            if (!allPressed && part !== torso) {
-                av = Math.max(-MAX_ANGULAR_VEL, Math.min(MAX_ANGULAR_VEL, av));
-            }
-            Body.setAngularVelocity(part, av);
-        }
-
-        // --- Torso stabilization (velocity PD with smooth blending) ---
-        // Smoothly transitions between idle (strong) and active (weak) gains
-        // to avoid the glitchy snap that caused "random/crazy" feel.
-        // The blend rate means pressing/releasing a key gradually changes
-        // stability over ~17 frames instead of instantly.
-        if (!allPressed) {
-            const targetBlend = anyPressed ? 1 : 0;
-            runner.stabBlend += (targetBlend - runner.stabBlend) * STAB_BLEND_RATE;
-
-            const stab = TORSO_STAB_IDLE + (TORSO_STAB_ACTIVE - TORSO_STAB_IDLE) * runner.stabBlend;
-            const damp = TORSO_DAMP_IDLE + (TORSO_DAMP_ACTIVE - TORSO_DAMP_IDLE) * runner.stabBlend;
-            Body.setAngularVelocity(torso,
-                torso.angularVelocity * damp - torso.angle * stab
-            );
-        }
 
         // === Easter egg: all four keys = rolling cartwheel ===
         if (allPressed) {
@@ -472,8 +398,8 @@ const Runner = (function() {
             applyJointMotor(torso, rightThigh, phase > 0 ? -HIP_MOTOR_SPEED : HIP_MOTOR_SPEED, HIP_MAX_TORQUE);
             applyJointMotor(leftThigh, leftCalf, KNEE_MOTOR_SPEED * 0.4, KNEE_MAX_TORQUE);
             applyJointMotor(rightThigh, rightCalf, KNEE_MOTOR_SPEED * 0.4, KNEE_MAX_TORQUE);
-            applyJointMotor(leftCalf, leftFoot, 0, BRAKE_TORQUE);
-            applyJointMotor(rightCalf, rightFoot, 0, BRAKE_TORQUE);
+            applyJointMotor(leftCalf, leftFoot, 0, HIP_MAX_TORQUE);
+            applyJointMotor(rightCalf, rightFoot, 0, HIP_MAX_TORQUE);
 
             enforceAngleLimit(torso, leftThigh, -2.2, 2.2);
             enforceAngleLimit(torso, rightThigh, -2.2, 2.2);
@@ -507,41 +433,27 @@ const Runner = (function() {
             rightKneeTarget = KNEE_MOTOR_SPEED;
         }
 
-        // --- Apply motors for active joints, LOCK inactive joints ---
-
+        // --- HIPS ---
         if (anyHipKey) {
-            // Drive hips
             applyJointMotor(torso, leftThigh, leftHipTarget, HIP_MAX_TORQUE);
             applyJointMotor(torso, rightThigh, rightHipTarget, HIP_MAX_TORQUE);
         } else {
-            // Lock hips rigid
-            lockJoint(torso, leftThigh);
-            lockJoint(torso, rightThigh);
+            lockJoint(torso, leftThigh, LEFT_HIP_REST);
+            lockJoint(torso, rightThigh, RIGHT_HIP_REST);
         }
 
+        // --- KNEES ---
         if (anyKneeKey) {
-            // Drive knees
             applyJointMotor(leftThigh, leftCalf, leftKneeTarget, KNEE_MAX_TORQUE);
             applyJointMotor(rightThigh, rightCalf, rightKneeTarget, KNEE_MAX_TORQUE);
         } else {
-            // Lock knees rigid
-            lockJoint(leftThigh, leftCalf);
-            lockJoint(rightThigh, rightCalf);
+            lockJoint(leftThigh, leftCalf, LEFT_KNEE_REST);
+            lockJoint(rightThigh, rightCalf, RIGHT_KNEE_REST);
         }
 
-        // Cross-locking: when hips are active, lock knees too (and vice versa)
-        if (anyHipKey && !anyKneeKey) {
-            lockJoint(leftThigh, leftCalf);
-            lockJoint(rightThigh, rightCalf);
-        }
-        if (anyKneeKey && !anyHipKey) {
-            lockJoint(torso, leftThigh);
-            lockJoint(torso, rightThigh);
-        }
-
-        // Ankles: ALWAYS locked rigid
-        lockJoint(leftCalf, leftFoot);
-        lockJoint(rightCalf, rightFoot);
+        // --- ANKLES: always locked ---
+        lockJoint(leftCalf, leftFoot, LEFT_ANKLE_REST);
+        lockJoint(rightCalf, rightFoot, RIGHT_ANKLE_REST);
 
         // --- Enforce angle limits ---
         enforceAngleLimit(torso, leftThigh, HIP_MIN_ANGLE, HIP_MAX_ANGLE);
