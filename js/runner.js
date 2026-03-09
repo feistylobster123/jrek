@@ -52,21 +52,32 @@ const Runner = (function() {
     const FOOT_FRICTION = 3.0;
 
     // === JOINT MOTOR PARAMETERS ===
-    // Used when actively driving a joint (button pressed).
-    const HIP_MOTOR_SPEED = 0.12;
-    const KNEE_MOTOR_SPEED = 0.12;
-    const HIP_MAX_TORQUE = 2.5;
-    const KNEE_MAX_TORQUE = 2.0;
-    const MOTOR_GAIN = 8.0;
+    // Motors now drive toward TARGET ANGLES (not speeds).
+    // When J/R/E/K is pressed, the joint's target angle shifts from its rest position.
+    // Uses the same PD controller as lockJoint but with a softer response.
+    // This creates real constraint forces: if the foot is planted, the body moves.
+    const HIP_DRIVE_ANGLE = 0.35;    // How far hips swing from rest (radians, ~20deg)
+    const KNEE_DRIVE_ANGLE = 0.30;   // How far knees bend from rest
+    const MOTOR_POS_GAIN = 0.40;     // Softer than LOCK_POS_GAIN (0.80) for gradual drive
+    const MOTOR_DAMP = 0.90;         // Motor damping (less aggressive than lock's 0.98)
 
     // === JOINT LOCKING (VELOCITY-BASED PD PER JOINT) ===
-    // Every joint uses a PD controller to hold its rest angle.
-    // This is the ONLY stabilization system -- no separate torso PD.
-    // CRITICAL: uses velocity corrections, NOT torques. Torque-based PD
-    // fights Matter.js's spring constraints and injects energy until blowup.
-    // Velocity corrections work WITH the constraint solver.
-    const LOCK_DAMP = 0.95;     // Kill 95% of relative angular velocity per frame
-    const LOCK_POS_GAIN = 0.15; // Position correction: velocity += error * gain
+    // Each joint uses a PD controller to hold its rest angle.
+    // Handles RELATIVE angles between connected bodies.
+    // Must be strong enough to overpower the pin constraint's tendency
+    // to collapse joints toward 0 relative angle (constraint restoring torque).
+    const LOCK_DAMP = 0.98;     // Kill relative angular velocity per frame
+    const LOCK_POS_GAIN = 0.80; // Position correction: velocity += error * gain
+
+    // === TORSO BALANCE (VELOCITY-BASED PD) ===
+    // Handles ABSOLUTE upright balance (the inverted pendulum problem).
+    // Per-joint PD can't detect whole-body tilt because hip/knee relative
+    // angles stay constant when the body tilts as a unit. Only the torso PD
+    // references the world frame (angle=0 = upright).
+    const TORSO_STAB_IDLE = 0.30;   // P gain: velocity correction per radian of tilt
+    const TORSO_STAB_ACTIVE = 0.04; // Much weaker when keys pressed (allows lean for ground reaction)
+    const TORSO_DAMP_IDLE = 0.82;   // D: multiplicative damping (1.0 = none)
+    const TORSO_DAMP_ACTIVE = 0.92; // Less damping during active control (more momentum)
 
     // === JOINT REST ANGLES (from split stance geometry) ===
     // These are the relative angles between parent and child at spawn.
@@ -278,7 +289,7 @@ const Runner = (function() {
         constraints.push(Constraint.create({
             bodyA: parts.torso, pointA: { x: -3, y: TORSO_H / 2 },
             bodyB: parts.leftFoot, pointB: { x: 0, y: 0 },
-            stiffness: 0.3, damping: 0.3, length: leftBraceLen, label: 'leftFullLeg',
+            stiffness: 0.25, damping: 0.2, length: leftBraceLen, label: 'leftFullLeg',
         }));
 
         const rightBraceLen = Math.sqrt(
@@ -288,7 +299,7 @@ const Runner = (function() {
         constraints.push(Constraint.create({
             bodyA: parts.torso, pointA: { x: 3, y: TORSO_H / 2 },
             bodyB: parts.rightFoot, pointB: { x: 0, y: 0 },
-            stiffness: 0.3, damping: 0.3, length: rightBraceLen, label: 'rightFullLeg',
+            stiffness: 0.25, damping: 0.2, length: rightBraceLen, label: 'rightFullLeg',
         }));
 
         // Thigh cross-brace
@@ -308,7 +319,7 @@ const Runner = (function() {
         constraints.push(Constraint.create({
             bodyA: parts.leftThigh, pointA: { x: 0, y: UPPER_LEG_H / 3 },
             bodyB: parts.rightThigh, pointB: { x: 0, y: UPPER_LEG_H / 3 },
-            stiffness: 0.2, damping: 0.3, length: thighBraceLen, label: 'thighBrace',
+            stiffness: 0.15, damping: 0.2, length: thighBraceLen, label: 'thighBrace',
         }));
 
         const runner = {
@@ -337,42 +348,62 @@ const Runner = (function() {
         Composite.remove(world, runner.constraints);
     }
 
-    // === JOINT MOTOR (TORQUE-BASED) ===
-    function applyJointMotor(parent, child, targetSpeed, maxTorque) {
+    // === JOINT MOTOR (ANGLE-TARGETING PD) ===
+    // Drives joint toward a TARGET ANGLE using the same PD approach as lockJoint
+    // but with softer gains. When a foot is planted, the constraint chain converts
+    // angular corrections into ground reaction forces = forward/backward motion.
+    function driveJoint(parent, child, targetAngle) {
+        let relAngle = child.angle - parent.angle;
+        while (relAngle > Math.PI) relAngle -= 2 * Math.PI;
+        while (relAngle < -Math.PI) relAngle += 2 * Math.PI;
         const relAngVel = child.angularVelocity - parent.angularVelocity;
-        let torque = (targetSpeed - relAngVel) * MOTOR_GAIN;
-        if (torque > maxTorque) torque = maxTorque;
-        if (torque < -maxTorque) torque = -maxTorque;
-        child.torque += torque;
-        parent.torque -= torque;
+        const angleError = targetAngle - relAngle;
+        const dampCorrection = -relAngVel * MOTOR_DAMP;
+        const posCorrection = angleError * MOTOR_POS_GAIN;
+        Body.setAngularVelocity(child,
+            child.angularVelocity + dampCorrection + posCorrection
+        );
     }
 
     // === ANGLE LIMIT ENFORCEMENT ===
+    // Two-part response: (1) kill velocity going further into limit,
+    // (2) push back toward limit. Without velocity kill, fast-moving
+    // joints blow right through the limit.
     function enforceAngleLimit(parent, child, minAngle, maxAngle) {
         let relAngle = child.angle - parent.angle;
         while (relAngle > Math.PI) relAngle -= 2 * Math.PI;
         while (relAngle < -Math.PI) relAngle += 2 * Math.PI;
 
+        const relVel = child.angularVelocity - parent.angularVelocity;
+
         if (relAngle < minAngle) {
             const overshoot = minAngle - relAngle;
-            Body.setAngularVelocity(child, child.angularVelocity + overshoot * 0.5);
-            Body.setAngularVelocity(parent, parent.angularVelocity - overshoot * 0.15);
+            // Kill velocity going further into limit
+            if (relVel < 0) {
+                Body.setAngularVelocity(child, child.angularVelocity - relVel * 0.9);
+            }
+            // Push back toward limit
+            Body.setAngularVelocity(child, child.angularVelocity + overshoot * 0.8);
+            Body.setAngularVelocity(parent, parent.angularVelocity - overshoot * 0.2);
         }
         if (relAngle > maxAngle) {
             const overshoot = relAngle - maxAngle;
-            Body.setAngularVelocity(child, child.angularVelocity - overshoot * 0.5);
-            Body.setAngularVelocity(parent, parent.angularVelocity + overshoot * 0.15);
+            // Kill velocity going further into limit
+            if (relVel > 0) {
+                Body.setAngularVelocity(child, child.angularVelocity - relVel * 0.9);
+            }
+            // Push back toward limit
+            Body.setAngularVelocity(child, child.angularVelocity - overshoot * 0.8);
+            Body.setAngularVelocity(parent, parent.angularVelocity + overshoot * 0.2);
         }
     }
 
     /**
      * Core control function -- called every physics frame.
      *
-     * NICK'S SIMPLIFIED APPROACH:
-     * - No separate torso PD controller
-     * - No per-frame angular damping loop
-     * - ONE system: per-joint PD locks that hold rest angles
-     * - When idle: ALL joints locked at rest angles = rigid body
+     * HYBRID APPROACH:
+     * - Per-joint PD locks hold relative angles (keeps limbs rigid)
+     * - Separate torso PD handles absolute balance (inverted pendulum)
      * - J/R: drive hips with motors, everything else locked
      * - E/K: drive knees with motors, everything else locked
      * - All four: rolling easter egg
@@ -381,9 +412,22 @@ const Runner = (function() {
         const { torso, leftThigh, rightThigh, leftCalf, rightCalf, leftFoot, rightFoot } = runner.parts;
 
         const allPressed = keys.j && keys.r && keys.e && keys.k;
+        const anyPressed = keys.j || keys.r || keys.e || keys.k;
         const anyHipKey = keys.j || keys.r;
         const anyKneeKey = keys.e || keys.k;
         runner.rolling = allPressed;
+
+        // --- Torso balance PD (absolute world-frame reference) ---
+        // Per-joint PD only corrects relative angles. When the whole body
+        // tilts as a unit, hip/knee angles don't change. Only this PD
+        // references absolute vertical (angle=0).
+        if (!allPressed) {
+            const stabStrength = anyPressed ? TORSO_STAB_ACTIVE : TORSO_STAB_IDLE;
+            const dampFactor = anyPressed ? TORSO_DAMP_ACTIVE : TORSO_DAMP_IDLE;
+            Body.setAngularVelocity(torso,
+                torso.angularVelocity * dampFactor - torso.angle * stabStrength
+            );
+        }
 
         // === Easter egg: all four keys = rolling cartwheel ===
         if (allPressed) {
@@ -394,12 +438,12 @@ const Runner = (function() {
             });
 
             const phase = Math.sin(torso.angle * 2);
-            applyJointMotor(torso, leftThigh, phase > 0 ? HIP_MOTOR_SPEED : -HIP_MOTOR_SPEED, HIP_MAX_TORQUE);
-            applyJointMotor(torso, rightThigh, phase > 0 ? -HIP_MOTOR_SPEED : HIP_MOTOR_SPEED, HIP_MAX_TORQUE);
-            applyJointMotor(leftThigh, leftCalf, KNEE_MOTOR_SPEED * 0.4, KNEE_MAX_TORQUE);
-            applyJointMotor(rightThigh, rightCalf, KNEE_MOTOR_SPEED * 0.4, KNEE_MAX_TORQUE);
-            applyJointMotor(leftCalf, leftFoot, 0, HIP_MAX_TORQUE);
-            applyJointMotor(rightCalf, rightFoot, 0, HIP_MAX_TORQUE);
+            applyJointMotor(torso, leftThigh, phase > 0 ? HIP_MOTOR_SPEED : -HIP_MOTOR_SPEED);
+            applyJointMotor(torso, rightThigh, phase > 0 ? -HIP_MOTOR_SPEED : HIP_MOTOR_SPEED);
+            applyJointMotor(leftThigh, leftCalf, KNEE_MOTOR_SPEED * 0.4);
+            applyJointMotor(rightThigh, rightCalf, KNEE_MOTOR_SPEED * 0.4);
+            applyJointMotor(leftCalf, leftFoot, 0);
+            applyJointMotor(rightCalf, rightFoot, 0);
 
             enforceAngleLimit(torso, leftThigh, -2.2, 2.2);
             enforceAngleLimit(torso, rightThigh, -2.2, 2.2);
@@ -435,8 +479,8 @@ const Runner = (function() {
 
         // --- HIPS ---
         if (anyHipKey) {
-            applyJointMotor(torso, leftThigh, leftHipTarget, HIP_MAX_TORQUE);
-            applyJointMotor(torso, rightThigh, rightHipTarget, HIP_MAX_TORQUE);
+            applyJointMotor(torso, leftThigh, leftHipTarget);
+            applyJointMotor(torso, rightThigh, rightHipTarget);
         } else {
             lockJoint(torso, leftThigh, LEFT_HIP_REST);
             lockJoint(torso, rightThigh, RIGHT_HIP_REST);
@@ -444,8 +488,8 @@ const Runner = (function() {
 
         // --- KNEES ---
         if (anyKneeKey) {
-            applyJointMotor(leftThigh, leftCalf, leftKneeTarget, KNEE_MAX_TORQUE);
-            applyJointMotor(rightThigh, rightCalf, rightKneeTarget, KNEE_MAX_TORQUE);
+            applyJointMotor(leftThigh, leftCalf, leftKneeTarget);
+            applyJointMotor(rightThigh, rightCalf, rightKneeTarget);
         } else {
             lockJoint(leftThigh, leftCalf, LEFT_KNEE_REST);
             lockJoint(rightThigh, rightCalf, RIGHT_KNEE_REST);
